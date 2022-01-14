@@ -1,18 +1,39 @@
 import sys
 import os
 import cv2
+import numpy as np
 from pathlib import Path
 
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.Qt import Qt
 
+from pcdet.utils.box_utils import boxes3d_kitti_camera_to_imageboxes
 from SeeingThroughFog.tools.DatasetViewer.lib.read import get_kitti_object_list
-from utils.read_datastructure import generate_dense_datastructure
+from utils.read_datastructure import generate_dense_datastructure, get_img_shape
+from utils.dense_transforms import Calibration, get_calib_from_json
 from dense_tracker import Tracker
 
 DENSE = Path.home() / 'ObjectDetection/data/external/SeeingThroughFog'
 STF = Path.home() / 'ObjectDetection/AB3DMOT/SeeingThroughFog'
+
+
+def reproject_camera_bbox(labels, calib, img_shape):
+
+    reprojected_label = labels.copy()
+
+    for idx, obj in enumerate(labels):
+        # box_camera [x, y, z, l, h, w, r] in rect camera coords
+        box_cam = np.asarray([obj['posx'], obj['posy'], obj['posz'], obj['length'],
+                              obj['height'], obj['width'], obj['orient3d']])
+        box_cam = box_cam.reshape((1, -1))
+        box_cam_img = boxes3d_kitti_camera_to_imageboxes(box_cam, calib, img_shape)
+        reprojected_label[idx]['xleft'] = int(box_cam_img[0, 0])
+        reprojected_label[idx]['ytop'] = int(box_cam_img[0, 1])
+        reprojected_label[idx]['xright'] = int(box_cam_img[0, 2])
+        reprojected_label[idx]['ybottom'] = int(box_cam_img[0, 3])
+
+    return reprojected_label
 
 
 class ImgDrawer:
@@ -22,13 +43,16 @@ class ImgDrawer:
         assert dense_struct
 
         self.image_list = dense_struct
+        self.image_list.reverse()
         self.image_idx = 0
-        self.num_images = len(dense_struct)
+        self.num_images = len(self.image_list)
 
         self.font = cv2.FONT_HERSHEY_SIMPLEX
         self.font_scale = 1
 
-        self.tracker = Tracker(dense_struct, stf_path)
+        self.calib = Calibration(get_calib_from_json(STF))
+        self.img_shape = get_img_shape(self.image_list[0]['img'])
+        self.tracker = Tracker(self.image_list, stf_path)
 
     def _read_image(self):
         assert self.image_idx < self.num_images, f'Index {self.image_idx} is out of range. Elements in dataset: {self.num_images}'
@@ -48,6 +72,7 @@ class ImgDrawer:
         gt_label_path = self.image_list[self.image_idx]['gt_label']
         if gt_label_path:
             gt_labels = get_kitti_object_list(gt_label_path)
+            gt_labels = reproject_camera_bbox(gt_labels, self.calib, self.img_shape)
             for gt_label in gt_labels:
                 self.image = self._draw_bbox_from_label(self.image, gt_label, (0, 0, 255))
 
