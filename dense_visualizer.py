@@ -275,8 +275,6 @@ class DenseViewer(QMainWindow):
 
 if __name__ == "__main__":
 
-    base_file = '2018-02-03_21-04-07_00000'
-
     app = QApplication(sys.argv)
     ip = DenseViewer(DENSE, base_file, STF, past_idx=-6)
     ip.show()
