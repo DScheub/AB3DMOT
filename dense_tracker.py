@@ -78,6 +78,9 @@ class Tracker:
             box_camera = box_camera.reshape(-1)
             box_camera_img = box_camera_img.reshape(-1)
 
+            xyz_camera = box_camera[:3].reshape(1, -1)
+            xyz_lidar = self.calib.rect_to_lidar(xyz_camera).reshape(-1)
+
             tracked_obj_label = {'identity': 'Car',
                                  'xleft': int(box_camera_img[0]),
                                  'ytop': int(box_camera_img[1]),
@@ -87,9 +90,15 @@ class Tracker:
                                  'posy': box_camera[1],
                                  'posz': box_camera[2],
                                  'length': box_camera[3],
-                                 'heigth': box_camera[4],
+                                 'height': box_camera[4],
                                  'width': box_camera[5],
                                  'orient3d': box_camera[6],
+                                 'posx_lidar': xyz_lidar[0],
+                                 'posy_lidar': xyz_lidar[1],
+                                 'posz_lidar': xyz_lidar[2],
+                                 'rotx': 0,
+                                 'roty': 0,
+                                 'rotz': box_camera[6] + np.pi/2,
                                  'id': int(tracked_obj[7]),
                                  'confidence': tracked_obj[-1]}
 
