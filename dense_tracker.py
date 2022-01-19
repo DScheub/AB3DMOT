@@ -34,7 +34,7 @@ class Tracker:
 
     def _run_tracking_for_single_frame(self, labels_in_frame, is_gt):
 
-        assert len(labels_in_frame) > 0  # Remove later, empty label should be fine
+        # assert len(labels_in_frame) > 0  # Remove later, empty label should be fine
 
         detections = []
         infos = []

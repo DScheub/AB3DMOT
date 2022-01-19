@@ -13,13 +13,17 @@ from PyQt5.Qt import Qt
 import pyqtgraph.opengl as gl
 
 from pcdet.utils.box_utils import boxes3d_kitti_camera_to_imageboxes
-from SeeingThroughFog.tools.DatasetViewer.lib.read import get_kitti_object_list
-from utils.read_datastructure import generate_dense_datastructure, get_img_shape
+from SeeingThroughFog.tools.DatasetViewer.lib.read import get_kitti_object_list, load_radar_points
+from utils.read_datastructure import generate_indexed_datastructure, get_img_shape
 from utils.dense_transforms import Calibration, get_calib_from_json
 from dense_tracker import Tracker
 
-DENSE = Path.home() / 'ObjectDetection/data/external/SeeingThroughFog'
+# DENSE = Path.home() / 'ObjectDetection/data/external/SeeingThroughFog'
+DENSE = Path.home() / 'ObjectDetection/data/external/SprayAugmentation/2019-09-11_21-15-42'
 STF = Path.home() / 'ObjectDetection/AB3DMOT/SeeingThroughFog'
+
+RUN_TRACKER = False
+USE_RADAR = True
 
 
 def reproject_camera_bbox(labels, calib, img_shape):
@@ -51,52 +55,49 @@ class DenseDrawer:
 
         assert dense_struct
 
-        self.image_list = dense_struct
-        self.image_list.reverse()
-        self.image_idx = 0
-        self.num_images = len(self.image_list)
+        self.dense_data = dense_struct
+        self.dense_data.reverse()
+        self.index = 0
+        self.num_data = len(self.dense_data)
 
         self.font = cv2.FONT_HERSHEY_SIMPLEX
         self.font_scale = 1
 
         self.calib = Calibration(get_calib_from_json(STF))
-        self.img_shape = get_img_shape(self.image_list[0]['img'])
-        self.tracker = Tracker(self.image_list, stf_path)
+        self.img_shape = get_img_shape(self.dense_data[0]['img'])
+        if RUN_TRACKER:
+            self.tracker = Tracker(self.dense_data, stf_path)
 
-        self.image = None
-        self.label_list = []
+        self.current_image = None
+        self.labels = {'pred_label': [], 'gt_label': [], 'tracked': []}
+        self.radar_detections = None
 
-    def _read_image(self):
-        assert self.image_idx < self.num_images, f'Index {self.image_idx} is out of range. Elements in dataset: {self.num_images}'
-        img_path = self.image_list[self.image_idx]['img']
+    def _draw_image(self):
+
+        img_path = self.dense_data[self.index]['img']
         assert os.path.isfile(img_path)
 
-        self.image = cv2.imread(img_path)
+        self.current_image = cv2.imread(img_path)
 
-        timestamp = self.image_list[self.image_idx]['frame_id']['idx']
-        cv2.putText(self.image, f'Timestep: {timestamp}', (10, 50), self.font, self.font_scale, (0, 255, 0))
+        timestamp = self.dense_data[self.index]['frame_id']['idx']
+        cv2.putText(self.current_image, f'Timestep: {timestamp}', (10, 50), self.font, self.font_scale, (0, 255, 0))
 
-        self.label_list = []
+        for pred_label in self.labels['pred_label']:
+            self.current_image = self._draw_bbox_from_label(self.current_image, pred_label, top_text='Score: %.2f' % pred_label['score'])
 
-        pred_label_path = self.image_list[self.image_idx]['pred_label']
-        pred_labels = self._get_label(pred_label_path, 'pred_label')
-        for pred_label in pred_labels:
-            self.image = self._draw_bbox_from_label(self.image, pred_label, top_text='Score: %.2f' % pred_label['score'])
-            self.label_list.append(pred_label)
+        for gt_label in self.labels['gt_label']:
+            self.current_image = self._draw_bbox_from_label(self.current_image, gt_label)
 
-        gt_label_path = self.image_list[self.image_idx]['gt_label']
-        if gt_label_path:
-            gt_labels = self._get_label(gt_label_path, 'gt_label')
-            gt_labels = reproject_camera_bbox(gt_labels, self.calib, self.img_shape)
-            for gt_label in gt_labels:
-                self.image = self._draw_bbox_from_label(self.image, gt_label)
-                self.label_list.append(gt_label)
+        for tracked_obj in self.labels['tracked']:
+            self.current_image = self._draw_bbox_from_label(self.current_image, tracked_obj, bottom_text='ID: %s' % tracked_obj['id'])
 
-        tracked_objects_in_frame = self.tracker.get_tracked_objects_in_frame(self.image_idx)
-        for tracked_obj in tracked_objects_in_frame:
-            tracked_obj.update({'color': self.COLOR['tracked']})
-            self.image = self._draw_bbox_from_label(self.image, tracked_obj, bottom_text='ID: %s' % tracked_obj['id'])
-            self.label_list.append(tracked_obj)
+        if self.radar_detections is not None:
+            pts_camera = self.calib.radar_to_rect(self.radar_detections[:, :3])
+            pts_img, _ = self.calib.rect_to_img(pts_camera)
+            for idx, pt in enumerate(pts_img):
+                if self.radar_detections[idx, 3] > 0:
+                    marker_pos = tuple((int(pt[0]), int(pt[1])))
+                    cv2.drawMarker(self.current_image, marker_pos, (200, 200, 200), markerType=cv2.MARKER_STAR, markerSize=10, thickness=2)
 
     def _draw_bbox_from_label(self, image, label, top_text=None, bottom_text=None, font_scale=0.5):
 
@@ -111,44 +112,81 @@ class DenseDrawer:
         cv2.rectangle(image, x, y, bbox_color, 2)
 
         if top_text:
-            cv2.putText(self.image, top_text, (x[0], x[1] - 10), self.font, font_scale, bbox_color)
+            cv2.putText(image, top_text, (x[0], x[1] - 10), self.font, font_scale, bbox_color)
         if bottom_text:
-            cv2.putText(self.image, bottom_text, (x[0], y[1] + 20), self.font, font_scale, bbox_color)
+            cv2.putText(image, bottom_text, (x[0], y[1] + 20), self.font, font_scale, bbox_color)
 
         return image
 
-    def _get_label(self, label_path, label_type='pred_label'):
-        label = get_kitti_object_list(label_path, self.calib.C2V)
-        for obj in label:
-            obj.update({'color': self.COLOR[label_type]})
+    def _update(self):
 
-        return label
+        assert self.index < self.num_data, f'Index {self.index} is out of range. Elements in dataset: {self.num_data}'
+        current_frame = self.dense_data[self.index]
+
+        self.current_image = None
+        self.labels = {'pred_label': [], 'gt_label': [], 'tracked': []}
+        self.radar_detections = None 
+
+        for label_type in ['pred_label', 'gt_label']:
+            label_path = current_frame[label_type]
+            label_list = []
+            if label_path:
+                label = get_kitti_object_list(label_path, self.calib.C2V)
+                for obj in label:
+                    obj.update({'color': self.COLOR[label_type]})
+                    label_list.append(obj)
+                self.labels[label_type] = label_list
+
+        if RUN_TRACKER:
+            tracked_objects_in_frame = self.tracker.get_tracked_objects_in_frame(self.index)
+            tracked_list = []
+            for tracked_obj in tracked_objects_in_frame:
+                tracked_obj.update({'color': self.COLOR['tracked']})
+                tracked_list.append(tracked_obj)
+            self.labels['tracked'] = tracked_list
+
+        if USE_RADAR and ('radar' in current_frame):
+            self.radar_detections = []
+            if current_frame['radar']:
+                pts_radar = load_radar_points(self.dense_data[self.index]['radar'])
+                pts_radar = np.asarray(pts_radar)  # [[x_sc, y_sc, 0, rVelGround, rDist], ...] (N, 5)
+                self.radar_detections = pts_radar[pts_radar[:, 3] > 0, :]  # Eliminate dets with 0 velocity
+
+        self._draw_image()
 
     def get_current_frame(self):
-        self._read_image()
-        return self.image, self.image_list[self.image_idx]['pc'], self.label_list
+        self._update()
+        labels = []
+        for _, label in self.labels.items():
+            labels += label
+
+        radar_dets_lidar = None
+        if self.radar_detections is not None:
+            radar_dets_lidar = self.calib.radar_to_lidar(self.radar_detections[:, :3])
+
+        return self.current_image, self.dense_data[self.index]['pc'], labels, radar_dets_lidar
 
     def get_next_frame(self):
-        self.image_idx = (self.image_idx + 1) % self.num_images
-        self._read_image()
-        return self.image, self.image_list[self.image_idx]['pc'], self.label_list
+        self.index = (self.index + 1) % self.num_data
+        return self.get_current_frame()
 
     def get_prev_frame(self):
-        self.image_idx = (self.image_idx - 1) % self.num_images
-        self._read_image()
-        return self.image, self.image_list[self.image_idx]['pc'], self.label_list
+        self.index = (self.index - 1) % self.num_data
+        return self.get_current_frame()
 
 
 class DenseViewer(QMainWindow):
 
     def __init__(self, root_dir: str, base_file: str, stf_path: str, past_idx=0, future_idx=0):
         super().__init__()
+        # super().keyPressEvent() = self.keyPressEvent()
 
-        dense_data = generate_dense_datastructure(root_dir, base_file, past_idx, future_idx)
+        # dense_data = generate_dense_datastructure(root_dir, base_file, past_idx, future_idx)
+        dense_data = generate_indexed_datastructure(root_dir)
         self.dense_drawer = DenseDrawer(dense_struct=dense_data, stf_path=stf_path)
 
         # Window settings
-        self.monitor = QDesktopWidget().screenGeometry(0)
+        self.monitor = QDesktopWidget().screenGeometry(1)
         self.setGeometry(self.monitor)
         self.showMaximized()
 
@@ -156,6 +194,7 @@ class DenseViewer(QMainWindow):
         self.widget = QWidget()
         self.widget.setLayout(self.layout)
         self.setCentralWidget(self.widget)
+        self.widget.keyPressEvent = self.keyPressEvent
 
         self.current_row = 0
 
@@ -177,9 +216,6 @@ class DenseViewer(QMainWindow):
         self.img_height = 1080
         self.label = QLabel(self)
         self.layout.addWidget(self.label, self.current_row, 3, 1, 3)
-        cv_img, pc_path, labels  = self.dense_drawer.get_current_frame()
-
-        self.update_viewer(cv_img, pc_path, labels)
 
         self.current_row += 1
 
@@ -191,22 +227,24 @@ class DenseViewer(QMainWindow):
         self.prev_btn.clicked.connect(self.decrement_index)
         self.next_btn.clicked.connect(self.increment_index)
 
+        cv_img, pc_path, labels, radar_dets = self.dense_drawer.get_current_frame()
+        self.update_viewer(cv_img, pc_path, labels, radar_dets)
+
     def decrement_index(self):
-        cv_img, pc_path, labels = self.dense_drawer.get_prev_frame()
-        self.update_viewer(cv_img, pc_path, labels)
+        cv_img, pc_path, labels, radar_dets = self.dense_drawer.get_prev_frame()
+        self.update_viewer(cv_img, pc_path, labels, radar_dets)
 
     def increment_index(self):
-        cv_img, pc_path, labels = self.dense_drawer.get_next_frame()
-        self.update_viewer(cv_img, pc_path, labels)
+        cv_img, pc_path, labels, radar_dets = self.dense_drawer.get_next_frame()
+        self.update_viewer(cv_img, pc_path, labels, radar_dets)
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Right:
+        if event.key() == Qt.Key_D:
             self.increment_index()
-        elif event.key() == Qt.Key_Left:
+        elif event.key() == Qt.Key_A:
             self.decrement_index()
 
-
-    def update_viewer(self, cv_img, pc_path=None, label=None):
+    def update_viewer(self, cv_img, pc_path=None, label=None, radar_dets=None):
         pixmap = self.convert_cv_qt(cv_img, self.img_width, self.img_height)
         self.label.setPixmap(pixmap)
 
@@ -214,7 +252,7 @@ class DenseViewer(QMainWindow):
             self.viewer.items = []
             pc = np.fromfile(pc_path, dtype=np.float32)
             pc = pc.reshape((-1, 5))
-            colors = self.get_colors(pc)
+            colors = self.get_pc_colors(pc)
             mesh = gl.GLScatterPlotItem(pos=np.asarray(pc[:, 0:3]), size=self.point_size, color=colors)
             self.viewer.addItem(mesh)
 
@@ -222,6 +260,10 @@ class DenseViewer(QMainWindow):
                 boxes = self.create_boxes(label)
                 for box in boxes:
                     self.viewer.addItem(box)
+
+            if radar_dets is not None:
+                mesh_radar = gl.GLScatterPlotItem(pos=radar_dets, size=10)
+                self.viewer.addItem(mesh_radar)
 
     def convert_cv_qt(self, cv_img, width, height):
         """Convert from an opencv image to QPixmap"""
@@ -232,7 +274,7 @@ class DenseViewer(QMainWindow):
         p = convert_to_qt_format.scaled(width, height, Qt.KeepAspectRatio)
         return QPixmap.fromImage(p)
 
-    def get_colors(self, pc: np.ndarray) -> np.ndarray:
+    def get_pc_colors(self, pc):
         """ Color in z direction """
         feature = pc[:, 2]
         max_value = 0.5
@@ -258,7 +300,6 @@ class DenseViewer(QMainWindow):
                 y = annotation['posy_lidar']
                 z = annotation['posz_lidar']
 
-
                 box = gl.GLBoxItem(size, color=annotation['color'])
                 box.setSize(annotation['length'], annotation['width'], annotation['height'])
                 box.translate(-annotation['length'] / 2, -annotation['width'] / 2, -annotation['height'] / 2)
@@ -274,6 +315,8 @@ class DenseViewer(QMainWindow):
 
 
 if __name__ == "__main__":
+
+    base_file = '2018-02-03_21-04-07_00000'
 
     app = QApplication(sys.argv)
     ip = DenseViewer(DENSE, base_file, STF, past_idx=-6)
