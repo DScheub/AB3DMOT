@@ -5,6 +5,14 @@ import numpy as np
 from filterpy.kalman import KalmanFilter
 
 
+def map_angle_to_range(angle):
+    if angle >= np.pi:
+        angle -= np.pi * 2
+    if angle < -np.pi:
+        angle += np.pi * 2
+    return angle
+
+
 class KalmanBoxDenseTracker(object):
     """
     This class represents the internel state of individual tracked objects observed as bbox.
@@ -12,7 +20,7 @@ class KalmanBoxDenseTracker(object):
 
     count = 0
 
-    def __init__(self, bbox3D, info, is_gt=False):
+    def __init__(self, bbox3D, confidence_score):
         """
         Initialises a tracker using initial bounding box.
         """
@@ -68,15 +76,13 @@ class KalmanBoxDenseTracker(object):
 
         # self.kf.R[0:,0:] *= 10.   # measurement uncertainty
 
-        # state uncertainty
-        self.kf.P = 10 * np.eye(self.dim_x)
-        self.kf.P[7:, 7:] *= 1000  # give high uncertainty to the unobservable initial velocities, covariance matrix
-        if is_gt:
-            self.kf.P[:7, :7] = 0.01 * np.eye(7)
+        # Inital values
+        self.kf.x[:7] = bbox3D.reshape((7, 1))  # initial condition
+        self.kf.P = 10 * np.eye(self.dim_x)  #  initial covariances
+        self.kf.P[7:, 7:] *= 100  # give high uncertainty to the unobservable initial velocities, covariance matrix
 
-        # self.kf.Q[-1,-1] *= 0.01    # process uncertainty
-        self.kf.Q[7:, 7:] *= 0.01
-        self.kf.x[:7] = bbox3D.reshape((7, 1))
+        self.kf.Q = 0.01 * np.eye(self.dim_x)  # process uncertainity
+        self.kf.R = np.eye(self.dim_z)  # measurement uncertainty
 
         self.time_since_update = 0
         self.id = KalmanBoxDenseTracker.count
@@ -87,9 +93,8 @@ class KalmanBoxDenseTracker(object):
         self.first_continuing_hit = 1
         self.still_first = True
         self.age = 0
-        self.info = info  # other info associated
 
-    def update(self, bbox3D, info):
+    def update(self, bbox3D, confidence_score):
         """
         Updates the state vector with observed bbox.
         """
@@ -101,54 +106,30 @@ class KalmanBoxDenseTracker(object):
             self.first_continuing_hit += 1  # number of continuing hit in the fist time
 
         # orientation correction
-        # make the theta still in the range
-        if self.kf.x[3] >= np.pi:
-            self.kf.x[3] -= np.pi * 2
-        if self.kf.x[3] < -np.pi:
-            self.kf.x[3] += np.pi * 2
-
-        # make the theta still in the range
-        new_theta = bbox3D[3]
-        if new_theta >= np.pi:
-            new_theta -= np.pi * 2
-        if new_theta < -np.pi:
-            new_theta += np.pi * 2
-        bbox3D[3] = new_theta
-
+        self.kf.x[3] = map_angle_to_range(self.kf.x[3])
+        bbox3D[3] = map_angle_to_range(bbox3D[3])
         # if the angle of two theta is not acute angle
-        predicted_theta = self.kf.x[3]
-        if abs(new_theta - predicted_theta) > np.pi / 2.0 and abs(new_theta - predicted_theta) < np.pi * 3 / 2.0:
+        if abs(self.kf.x[3] - bbox3D[3]) > np.pi / 2.0 and abs(self.kf.x[3] - bbox3D[3]) < np.pi * 3 / 2.0:
             self.kf.x[3] += np.pi
-            if self.kf.x[3] > np.pi:
-                self.kf.x[3] -= np.pi * 2
-            if self.kf.x[3] < -np.pi:
-                self.kf.x[3] += np.pi * 2
-
+            self.kf.x[3] = map_angle_to_range(self.kf.x[3])
         # now the angle is acute: < 90 or > 270, convert the case of > 270 to < 90
-        if abs(new_theta - self.kf.x[3]) >= np.pi * 3 / 2.0:
-            if new_theta > 0:
+        if abs(bbox3D[3] - self.kf.x[3]) >= np.pi * 3 / 2.0:
+            if bbox3D[3] > 0:
                 self.kf.x[3] += np.pi * 2
             else:
                 self.kf.x[3] -= np.pi * 2
 
-        # flip
-        self.kf.update(bbox3D)
-
-        if self.kf.x[3] >= np.pi:
-            self.kf.x[3] -= np.pi * 2
-        if self.kf.x[3] < -np.pi:
-            self.kf.x[3] += np.pi * 2
-        self.info = info
+        # Update kf with detections
+        R = (1 / confidence_score**4) * self.kf.R
+        self.kf.update(bbox3D, R=R)
+        self.kf.x[3] = map_angle_to_range(self.kf.x[3])
 
     def predict(self):
         """
         Advances the state vector and returns the predicted bounding box estimate.
         """
         self.kf.predict()
-        if self.kf.x[3] >= np.pi:
-            self.kf.x[3] -= np.pi * 2
-        if self.kf.x[3] < -np.pi:
-            self.kf.x[3] += np.pi * 2
+        self.kf.x[3] = map_angle_to_range(self.kf.x[3])
 
         self.age += 1
         if (self.time_since_update > 0):

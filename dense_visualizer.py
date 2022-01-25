@@ -9,20 +9,20 @@ from pathlib import Path
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QMainWindow, QGridLayout, QDesktopWidget, QPushButton
 from PyQt5.QtGui import QPixmap, QImage, QVector3D
 from PyQt5.Qt import Qt
-
 import pyqtgraph.opengl as gl
 
 from pcdet.utils.box_utils import boxes3d_kitti_camera_to_imageboxes
 from SeeingThroughFog.tools.DatasetViewer.lib.read import get_kitti_object_list, load_radar_points
 from utils.read_datastructure import generate_indexed_datastructure, get_img_shape
 from utils.dense_transforms import Calibration, get_calib_from_json
+from AB3DMOT_libs.model_dense import associate_radar_to_trackers
 from dense_tracker import Tracker
 
 # DENSE = Path.home() / 'ObjectDetection/data/external/SeeingThroughFog'
 DENSE = Path.home() / 'ObjectDetection/data/external/SprayAugmentation/2019-09-11_21-15-42'
 STF = Path.home() / 'ObjectDetection/AB3DMOT/SeeingThroughFog'
 
-RUN_TRACKER = False
+RUN_TRACKER = True 
 USE_RADAR = True
 
 
@@ -56,7 +56,7 @@ class DenseDrawer:
         assert dense_struct
 
         self.dense_data = dense_struct
-        self.dense_data.reverse()
+        # self.dense_data.reverse()
         self.index = 0
         self.num_data = len(self.dense_data)
 
@@ -98,7 +98,20 @@ class DenseDrawer:
                 if self.radar_detections[idx, 3] > 0:
                     marker_pos = tuple((int(pt[0]), int(pt[1])))
                     cv2.drawMarker(self.current_image, marker_pos, (200, 200, 200), markerType=cv2.MARKER_STAR, markerSize=10, thickness=2)
+            tracker_dets = np.zeros((len(self.labels['tracked']), 3))
+            for idx, obj in enumerate(self.labels['tracked']):
+                tracker_dets[idx, :] = np.array([obj['posx'], obj['posy'], obj['posz']])
 
+            if tracker_dets.size:
+                matches, _, _, = associate_radar_to_trackers(pts_camera, tracker_dets, distance_threshold=9)
+                for match in matches:
+                    pt = pts_img[int(match[0]), :]
+                    track_id = self.labels['tracked'][int(match[1])]['id']
+                    marker_pos = tuple((int(pt[0]), int(pt[1])))
+                    cv2.drawMarker(self.current_image, marker_pos, (0, 255, 0), markerType=cv2.MARKER_STAR, markerSize=10, thickness=2)
+                    cv2.putText(self.current_image, str(track_id), (marker_pos[0], marker_pos[1] + 20), self.font, 0.5, (0, 255, 0))
+
+        
     def _draw_bbox_from_label(self, image, label, top_text=None, bottom_text=None, font_scale=0.5):
 
         if label['identity'] not in ['Car', 'PassengerCar', 'RidableVehicle']:
@@ -182,7 +195,7 @@ class DenseViewer(QMainWindow):
         # super().keyPressEvent() = self.keyPressEvent()
 
         # dense_data = generate_dense_datastructure(root_dir, base_file, past_idx, future_idx)
-        dense_data = generate_indexed_datastructure(root_dir)
+        dense_data = generate_indexed_datastructure(root_dir, 68, 300)
         self.dense_drawer = DenseDrawer(dense_struct=dense_data, stf_path=stf_path)
 
         # Window settings

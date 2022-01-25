@@ -37,7 +37,7 @@ class Tracker:
         # assert len(labels_in_frame) > 0  # Remove later, empty label should be fine
 
         detections = []
-        infos = []
+        scores = []
 
         # Loop over all objects in current frame as read from label
         for idx, obj in enumerate(labels_in_frame):
@@ -49,19 +49,18 @@ class Tracker:
             detection += [obj['posx'], obj['posy'], obj['posz'], obj['orient3d']]
             detections.append(detection)
 
-            info = [obj['score']]
-            infos.append(info)
+            scores.append(obj['score'])
 
         if not detections:
             self.tracked_objects.append([])
             return
 
         # dets [[h,w,l,x,y,z,theta],...]
-        detections = {'dets': np.asarray(detections),
-                      'info': np.asarray(infos)}
+        detections = np.asarray(detections)
+        scores = np.asarray(scores).reshape(-1)
 
         # trackers [[h,w,l,x,y,z,theta,id],...]
-        trackers = self.mot_tracker.update(detections, is_gt)
+        trackers = self.mot_tracker.update(detections, scores)
 
         tracked_objects_in_frame = []
         # Loop over all tracked objects in current frame
