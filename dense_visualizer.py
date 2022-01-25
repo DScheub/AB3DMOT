@@ -98,18 +98,20 @@ class DenseDrawer:
                 if self.radar_detections[idx, 3] > 0:
                     marker_pos = tuple((int(pt[0]), int(pt[1])))
                     cv2.drawMarker(self.current_image, marker_pos, (200, 200, 200), markerType=cv2.MARKER_STAR, markerSize=10, thickness=2)
+            """
             tracker_dets = np.zeros((len(self.labels['tracked']), 3))
             for idx, obj in enumerate(self.labels['tracked']):
                 tracker_dets[idx, :] = np.array([obj['posx'], obj['posy'], obj['posz']])
 
             if tracker_dets.size:
-                matches, _, _, = associate_radar_to_trackers(pts_camera, tracker_dets, distance_threshold=9)
+                matches, _, _, = associate_radar_to_trackers(pts_camera, tracker_dets, distance_threshold=2)
                 for match in matches:
-                    pt = pts_img[int(match[0]), :]
+                    pt = pts_img[match[0], :]
                     track_id = self.labels['tracked'][int(match[1])]['id']
                     marker_pos = tuple((int(pt[0]), int(pt[1])))
                     cv2.drawMarker(self.current_image, marker_pos, (0, 255, 0), markerType=cv2.MARKER_STAR, markerSize=10, thickness=2)
                     cv2.putText(self.current_image, str(track_id), (marker_pos[0], marker_pos[1] + 20), self.font, 0.5, (0, 255, 0))
+            """
 
         
     def _draw_bbox_from_label(self, image, label, top_text=None, bottom_text=None, font_scale=0.5):
@@ -195,7 +197,8 @@ class DenseViewer(QMainWindow):
         # super().keyPressEvent() = self.keyPressEvent()
 
         # dense_data = generate_dense_datastructure(root_dir, base_file, past_idx, future_idx)
-        dense_data = generate_indexed_datastructure(root_dir, 68, 300)
+        # dense_data = generate_indexed_datastructure(root_dir, 68, 300)
+        dense_data = generate_indexed_datastructure(root_dir)
         self.dense_drawer = DenseDrawer(dense_struct=dense_data, stf_path=stf_path)
 
         # Window settings

@@ -78,7 +78,7 @@ class KalmanBoxDenseTracker(object):
 
         # Inital values
         self.kf.x[:7] = bbox3D.reshape((7, 1))  # initial condition
-        self.kf.P = 10 * np.eye(self.dim_x)  #  initial covariances
+        self.kf.P = 10 * np.eye(self.dim_x)  # initial covariances
         self.kf.P[7:, 7:] *= 100  # give high uncertainty to the unobservable initial velocities, covariance matrix
 
         self.kf.Q = 0.01 * np.eye(self.dim_x)  # process uncertainity
@@ -93,6 +93,12 @@ class KalmanBoxDenseTracker(object):
         self.first_continuing_hit = 1
         self.still_first = True
         self.age = 0
+
+        self.has_radar_assigned = False
+
+    def assign_radar(self):
+        print('Radar was assigned')
+        self.has_radar_assigned = True
 
     def update(self, bbox3D, confidence_score):
         """
