@@ -14,128 +14,95 @@ class Tracker:
     def __init__(self, dense_struct, stf_path):
 
         self.tracked_objects = []
-        self.tracked_objects_assigned = []
         self.mot_tracker = AB3DMOT()
 
         self.calib = Calibration(get_calib_from_json(stf_path, sensor_type='hdl64'))
         self.img_shape = get_img_shape(dense_struct[0]['img'])
 
-        # Loop over all frames in dense_struct
+        # Loop over all frames in dense_struct and prepare data
+        dets = []
+        conf = []
+        radar_dets = []
         for predictions in dense_struct:
+
+            # Load label
             if predictions['gt_label'] is not None:
                 label_path = predictions['gt_label']
             else:
                 label_path = predictions['pred_label']
-
             assert os.path.exists(label_path), f'{label_path} does not exist'
             labels = get_kitti_object_list(label_path)
 
-            radar_path = None
+            # Read detections from label
+            dets_per_frame = []
+            conf_per_frame = []
+            if len(labels) > 0:
+                dets_per_frame = np.zeros((len(labels), 7))
+                conf_per_frame = np.zeros(len(labels))
+                for idx, obj in enumerate(labels):
+                    dets_per_frame[idx, :] = np.asarray([obj['posx'], obj['posy'], obj['posz'],
+                                                         obj['orient3d'], obj['length'], obj['width'], obj['height']])
+                    conf_per_frame[idx] = obj['score']
+            dets.append(dets_per_frame)
+            conf.append(conf_per_frame)
+
+            # Read radar detections
+            radar_dets_per_frame = [] 
             if 'radar' in predictions.keys():
-                radar_path = predictions['radar'] 
-            self._run_tracking_for_single_frame(labels, radar_path)
+                pts_radar = load_radar_points(predictions['radar'])
+                if pts_radar.size > 0:
+                    pts_radar_cam = self.calib.radar_to_rect(pts_radar[:, :3]).reshape((-1, 3))
+                    radar_dets_per_frame = np.concatenate((pts_radar_cam, pts_radar[:, 3:]), axis=1)
+            radar_dets.append(radar_dets_per_frame)
 
-        obj_with_radar = []
-        for tracked_obj_in_frame in reversed(self.tracked_objects):
-            assigned_obj = []
-            for obj in tracked_obj_in_frame:
-                if obj['has_radar'] or (obj['id'] in obj_with_radar):
-                    obj_with_radar.append(obj['id'])
-                    assigned_obj.append(obj)
-            self.tracked_objects_assigned.append(assigned_obj)
-        self.tracked_objects_assigned.reverse()
+        # Run tracker
+        self.mot_tracker.run_for_all_frames(dets, conf, radar_dets)
 
+        # Generate Labels
+        assert self.mot_tracker.get_num_of_frames() == len(dense_struct)
+        for frame_idx in range(self.mot_tracker.get_num_of_frames()):
+            trackers_in_frame = self.mot_tracker.get_tracked_obj_in_frame(frame_idx)
+            labels_in_frame = []
+            for obj in trackers_in_frame:
+                state = obj.get_state()  # [x y z r l w h]
+                # box_camera [x, y, z, l, h, w, r] in rect camera coords
+                box_camera = np.concatenate((state[0:3], state[4:5], state[6:7], state[5:6], state[3:4]))
+                box_camera = box_camera.reshape(1, -1)
+                xyz_camera = box_camera[0, :3].reshape(1, -1)
+                xyz_lidar = self.calib.rect_to_lidar(xyz_camera).reshape(-1)
+                # box_camera_img [x1, y1, x2, y2]
+                box_camera_img = boxes3d_kitti_camera_to_imageboxes(box_camera, self.calib, self.img_shape)
 
-    def _run_tracking_for_single_frame(self, labels_in_frame, radar_path=None):
-
-        # assert len(labels_in_frame) > 0  # Remove later, empty label should be fine
-
-        detections = []
-        scores = []
-
-        # Loop over all objects in current frame as read from label
-        for idx, obj in enumerate(labels_in_frame):
-
-            if obj['identity'] not in ['Car', 'PassengerCar', 'RidableVehicle']:
-                continue
-
-            detection = [obj['height'], obj['width'], obj['length']]
-            detection += [obj['posx'], obj['posy'], obj['posz'], obj['orient3d']]
-            detections.append(detection)
-
-            scores.append(obj['score'])
-
-        if not detections:
-            self.tracked_objects.append([])
-            return
-
-        # dets [[h,w,l,x,y,z,theta],...]
-        detections = np.asarray(detections)
-        scores = np.asarray(scores).reshape(-1)
-
-        radar_det = None
-        if radar_path is not None:
-            # Radar detections in camera coordinates
-            assert os.path.exists(radar_path), f'{radar_path} does not exist'
-            pts_radar = load_radar_points(radar_path)
-            vel_mask = pts_radar[:, 3] > 0
-            pts_radar = pts_radar[vel_mask, :]
-            if pts_radar.size > 0:
-                pts_radar_cam = self.calib.radar_to_rect(pts_radar[:, :3])
-                radar_det = pts_radar_cam.reshape((-1, 3))
-
-        # trackers [[h,w,l,x,y,z,theta,id],...]
-        trackers = self.mot_tracker.update(detections, scores, radar_det)
-
-        tracked_objects_in_frame = []
-        # Loop over all tracked objects in current frame
-        for tracked_obj in trackers:
-
-            # box_camera [x, y, z, l, h, w, r] in rect camera coords
-            box_camera = np.asarray([tracked_obj[3], tracked_obj[4], tracked_obj[5],
-                                     tracked_obj[2], tracked_obj[0], tracked_obj[1], tracked_obj[6]])
-            box_camera = box_camera.reshape((1, -1))
-
-            # box_camera_img [x1, y1, x2, y2]
-            box_camera_img = boxes3d_kitti_camera_to_imageboxes(box_camera, self.calib, self.img_shape)
-
-            box_camera = box_camera.reshape(-1)
-            box_camera_img = box_camera_img.reshape(-1)
-
-            xyz_camera = box_camera[:3].reshape(1, -1)
-            xyz_lidar = self.calib.rect_to_lidar(xyz_camera).reshape(-1)
-
-            tracked_obj_label = {'identity': 'Car',
-                                 'xleft': int(box_camera_img[0]),
-                                 'ytop': int(box_camera_img[1]),
-                                 'xright': int(box_camera_img[2]),
-                                 'ybottom': int(box_camera_img[3]),
-                                 'posx': box_camera[0],
-                                 'posy': box_camera[1],
-                                 'posz': box_camera[2],
-                                 'length': box_camera[3],
-                                 'height': box_camera[4],
-                                 'width': box_camera[5],
-                                 'orient3d': box_camera[6],
-                                 'posx_lidar': xyz_lidar[0],
-                                 'posy_lidar': xyz_lidar[1],
-                                 'posz_lidar': xyz_lidar[2],
-                                 'rotx': 0,
-                                 'roty': 0,
-                                 'rotz': box_camera[6] + np.pi/2,
-                                 'id': int(tracked_obj[7]),
-                                 'has_radar': tracked_obj[8]}
-
-            tracked_objects_in_frame.append(tracked_obj_label)
-
-        self.tracked_objects.append(tracked_objects_in_frame)
+                box_camera = box_camera.reshape(-1)
+                box_camera_img = box_camera_img.reshape(-1)
+                tracked_obj_label = {'identity': 'Car',
+                                     'xleft': int(box_camera_img[0]),
+                                     'ytop': int(box_camera_img[1]),
+                                     'xright': int(box_camera_img[2]),
+                                     'ybottom': int(box_camera_img[3]),
+                                     'posx': box_camera[0],
+                                     'posy': box_camera[1],
+                                     'posz': box_camera[2],
+                                     'length': box_camera[3],
+                                     'height': box_camera[4],
+                                     'width': box_camera[5],
+                                     'orient3d': box_camera[6],
+                                     'posx_lidar': xyz_lidar[0],
+                                     'posy_lidar': xyz_lidar[1],
+                                     'posz_lidar': xyz_lidar[2],
+                                     'rotx': 0,
+                                     'roty': 0,
+                                     'rotz': box_camera[6] + np.pi/2,
+                                     'id': int(obj.id)}
+                labels_in_frame.append(tracked_obj_label)
+            self.tracked_objects.append(labels_in_frame)
 
     def get_num_of_frames(self):
         return len(self.tracked_objects)
 
     def get_tracked_objects_in_frame(self, frame_idx):
         assert frame_idx < self.get_num_of_frames(), f'Index {frame_idx} is out of range. Elements in dataset: {self.get_num_of_frames()}'
-        return self.tracked_objects_assigned[frame_idx]
+        return self.tracked_objects[frame_idx]
 
 
 if __name__ == "__main__":

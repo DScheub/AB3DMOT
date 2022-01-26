@@ -2,6 +2,7 @@
 # email: xinshuo.weng@gmail.com
 
 import numpy as np
+import copy
 # from sklearn.utils.linear_assignment_ import linear_assignment    # deprecated
 from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
@@ -83,23 +84,72 @@ def associate_detections_to_trackers(detections, trackers, iou_threshold=0.01):
     return matches, np.array(unmatched_detections), np.array(unmatched_trackers)
 
 
-class AB3DMOT(object):			  # A baseline of 3D multi-object tracking
+class AB3DMOT(object):
     def __init__(self, max_age=2, min_hits=5):      # max age will preserve the bbox does not appear no more than 2 frames, interpolate the detection
         """
-        Sets key parameters for SORT
+        TODO
         """
         self.max_age = max_age
         self.min_hits = min_hits
-        self.trackers = []
+
         self.frame_count = 0
-        self.reorder = [3, 4, 5, 6, 2, 1, 0]
-        self.reorder_back = [6, 5, 4, 0, 1, 2, 3]
+        self.trackers = []
+        self.trackers_over_time = []
+        self.trajectories = {}
+
+    def run_for_all_frames(self, dets, confidence_scores, radar_dets):
+        """
+        dets : (T, N, 7): T frames, N detections, [x, y, z, theta, l, w, h] in R^7 for bbox detections in camera coord.
+        confidence_scores: (T, N): Confidence for detection
+        radar_dets: (T, M, 5) Radar detection [x, y, z, r, v_r] in camera coord
+        """
+        assert (len(dets) == len(radar_dets)) and (len(dets) == len(confidence_scores)), f'Dets: {len(dets)}, ' \
+            f'Radar: {len(radar_dets)}, Conf: {len(confidence_scores)}'
+        num_frames = len(dets)
+        self.trackers, self.trackers_over_time, trackers_over_time = [], [], []
+        for frame in range(num_frames):
+
+            # Prepare data
+            det, conf, radar = [], [], []
+            if isinstance(dets[frame], np.ndarray):
+                det = dets[frame].reshape((-1, 7))
+            if isinstance(confidence_scores[frame], np.ndarray):
+                conf = confidence_scores[frame].reshape(-1)
+            if isinstance(radar_dets[frame], np.ndarray):
+                radar = radar_dets[frame].reshape((-1, 5))
+                # Filter out radar detections without velocity
+                velocity_mask = radar[:, 3] > 0
+                radar = radar[velocity_mask, 0:3]
+
+            # Run prediction and update step of Kalman Filter
+            tracked_obj_in_frame = self.update(det, conf, radar)
+            tracked_obj_in_frame_copy = copy.deepcopy(tracked_obj_in_frame)
+            
+            trackers_over_time.append(tracked_obj_in_frame_copy)
+
+        # Eliminate all tracked obj that were never assigned a radar detection
+        for tracked_obj_in_frame in reversed(trackers_over_time):
+            assigned_obj = []
+            for obj in tracked_obj_in_frame:
+                if obj.has_radar_assigned and (obj.id not in self.trajectories.keys()):
+                    assigned_obj.append(obj)
+                    self.trajectories[obj.id] = [obj]
+                elif obj.has_radar_assigned and (obj.id in self.trajectories.keys()):
+                    assigned_obj.append(obj)
+                    self.trajectories[obj.id].insert(0, obj)
+                elif (not obj.has_radar_assigned) and (obj.id in self.trajectories.keys()):
+                    assigned_obj.append(obj)
+                    self.trajectories[obj.id].insert(0, obj)
+                else:
+                    pass
+            self.trackers_over_time.append(assigned_obj)
+        self.trackers_over_time.reverse()
 
     def update(self, dets, confidence_scores, radar_dets=None):
         """
         Params:
           dets_all: dict
-            dets - a numpy array of detections in the format [[h,w,l,x,y,z,theta],...]
+            dets - a numpy array of detections in the format [[x,y,z,theta,l,w,h],...]
             confidence_scores in [0, 1]: (N, ) vector describing confidence of detection -> used to scale covariances
 
         Requires: this method must be called once for each frame even with empty detections.
@@ -107,17 +157,15 @@ class AB3DMOT(object):			  # A baseline of 3D multi-object tracking
 
         NOTE: The number of objects returned may differ from the number of detections provided.
         """
-        # reorder the data to put x,y,z in front to be compatible with the state transition matrix
-        # where the constant velocity model is defined in the first three rows of the matrix
 
-        assert (confidence_scores <= 1).all() and (confidence_scores >= 0).all(), f' Confidence scores: {confidence_scores}'
-        dets = dets[:, self.reorder]					# reorder the data to [[x,y,z,theta,l,w,h], ...]
+        if isinstance(confidence_scores, np.ndarray):
+            assert (confidence_scores <= 1).all() and (confidence_scores >= 0).all(), f' Confidence scores: {confidence_scores}'
 
-        self.frame_count += 1
+        self.frame_count += 1  # Accept objects in first frames as tracked even if below min_hits
 
-        trks = np.zeros((len(self.trackers), 7))         # N x 7 , # get predicted locations from existing trackers.
+        # Run prediction for already found trackers
+        trks = np.zeros((len(self.trackers), 7))  # N x 7 , # get predicted locations from existing trackers.
         to_del = []
-        ret = []
         for t, trk in enumerate(trks):
             pos = self.trackers[t].predict().reshape((-1, 1))
             trk[:] = [pos[0], pos[1], pos[2], pos[3], pos[4], pos[5], pos[6]]
@@ -127,6 +175,7 @@ class AB3DMOT(object):			  # A baseline of 3D multi-object tracking
         for t in reversed(to_del):
             self.trackers.pop(t)
 
+        # Get corners to caclulate IOU for asscciation of detection with trackers
         dets_8corner = [convert_3dbox_to_8corner(det_tmp) for det_tmp in dets]
         if len(dets_8corner) > 0:
             dets_8corner = np.stack(dets_8corner, axis=0)
@@ -137,44 +186,61 @@ class AB3DMOT(object):			  # A baseline of 3D multi-object tracking
             trks_8corner = np.stack(trks_8corner, axis=0)
         matched, unmatched_dets, unmatched_trks = associate_detections_to_trackers(dets_8corner, trks_8corner)
 
-        # update matched trackers with assigned detections
+        # Update matched trackers with assigned detections
         for t, trk in enumerate(self.trackers):
             if t not in unmatched_trks:
-                d = matched[np.where(matched[:, 1] == t)[0], 0]     # a list of index
+                d = matched[np.where(matched[:, 1] == t)[0], 0]
                 trk.update(dets[d, :][0], confidence_scores[d].squeeze())
 
         # Assign radar detections
-        if (radar_dets is not None) and (len(self.trackers) > 0):
+        if isinstance(radar_dets, np.ndarray) and self.trackers:
             # Check if radar detections can be assigned to tracker
-            xyz_camera = np.zeros((len(self.trackers), 3))
+            xyz_camera = []
             for idx, trk in enumerate(self.trackers):
-                xyz_camera[idx, :] = trk.get_state()[:3]
-            matches, _, _, = associate_radar_to_trackers(radar_dets, xyz_camera, distance_threshold=5)
-            for match in matches:
-                self.trackers[match[1]].assign_radar()
+                if trk.hits >= self.min_hits:
+                    state = trk.get_state()
+                    xyz_camera.append([state[0], state[1], state[2]])
+            if xyz_camera:
+                xyz_camera = np.asarray(xyz_camera)
+                matches, _, _, = associate_radar_to_trackers(radar_dets, xyz_camera, distance_threshold=6)
+                for match in matches:
+                    self.trackers[match[1]].assign_radar()
 
-        # create and initialise new trackers for unmatched detections
-        for i in unmatched_dets:        # a scalar of index
+        # Create and initialise new trackers for unmatched detections
+        for i in unmatched_dets:
             trk = KalmanBoxDenseTracker(dets[i, :], confidence_scores[i].squeeze())
             self.trackers.append(trk)
+
+        # Eliminate dead trackers and create return
+        good_trackers = []
         i = len(self.trackers)
         for trk in reversed(self.trackers):
-            d = trk.get_state()  # bbox location
-            d = d[self.reorder_back]  # change format from [x,y,z,theta,l,w,h] to [h,w,l,x,y,z,theta]
-
-            if ((trk.time_since_update < self.max_age) and (trk.hits >= self.min_hits or self.frame_count <= self.min_hits)):
-                ret.append(np.concatenate((d, [trk.id + 1, 1 if trk.has_radar_assigned else 0])).reshape(1, -1))  # +1 as MOT benchmark requires positive
+            # if ((trk.time_since_update < self.max_age) and (trk.hits >= self.min_hits or self.frame_count <= self.min_hits)):
+                # ret.append(np.concatenate((trk.get_state(), [trk.id + 1, 1 if trk.has_radar_assigned else 0])).reshape(1, -1))
+            good_trackers.append(trk)
             i -= 1
-
             # remove dead tracklet
             if (trk.time_since_update >= self.max_age):
                 self.trackers.pop(i)
 
-        if (len(ret) > 0):
-            ret_arr = np.concatenate(ret)  # h,w,l,x,y,z,theta, ID, other info, confidence
-            return ret_arr
-        else:
-            return np.empty((0, 15))
+        # Returns [[x, y, z, theta, l, w, h, has_radar],...]
+        # if len(ret) > 0:
+        #   return np.concatenate(ret)
+        # else:
+        #   return np.empty((0, 9))
+
+        return good_trackers
+
+    def get_num_of_frames(self):
+        return len(self.trackers_over_time)
+
+    def get_tracked_obj_in_frame(self, frame_idx):
+        assert frame_idx < len(self.trackers_over_time)
+        return self.trackers_over_time[frame_idx]
+
+    def get_trajectory_by_id(self, obj_id):
+        assert obj_id in self.trajectories.keys()
+        return self.trajectories[obj_id]
 
 
 if __name__ == "__main__":

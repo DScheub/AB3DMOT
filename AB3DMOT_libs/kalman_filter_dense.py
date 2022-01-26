@@ -96,6 +96,9 @@ class KalmanBoxDenseTracker(object):
 
         self.has_radar_assigned = False
 
+        if self.id == 17:
+            print(bbox3D, self.kf.x.T)
+
     def assign_radar(self):
         print('Radar was assigned')
         self.has_radar_assigned = True
@@ -104,6 +107,7 @@ class KalmanBoxDenseTracker(object):
         """
         Updates the state vector with observed bbox.
         """
+
         self.time_since_update = 0
         self.history = []
         self.hits += 1
@@ -129,6 +133,9 @@ class KalmanBoxDenseTracker(object):
         R = (1 / confidence_score**4) * self.kf.R
         self.kf.update(bbox3D, R=R)
         self.kf.x[3] = map_angle_to_range(self.kf.x[3])
+
+        if self.id == 17:
+            print(bbox3D, self.kf.x.T)
 
     def predict(self):
         """
