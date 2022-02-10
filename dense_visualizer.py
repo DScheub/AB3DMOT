@@ -5,18 +5,17 @@ import numpy as np
 import matplotlib.cm as cm
 import matplotlib as mpl
 from pathlib import Path
-from utils.planes import ObjectAnchor 
+from utils.planes import ObjectAnchor
 
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QMainWindow, QGridLayout, QDesktopWidget, QPushButton
 from PyQt5.QtGui import QPixmap, QImage, QVector3D
 from PyQt5.Qt import Qt
 import pyqtgraph.opengl as gl
 
-from pcdet.utils.box_utils import boxes3d_kitti_camera_to_imageboxes
 from SeeingThroughFog.tools.DatasetViewer.lib.read import get_kitti_object_list, load_radar_points
+from pcdet.utils.box_utils import boxes3d_kitti_camera_to_imageboxes, boxes3d_to_corners3d_kitti_camera
 from utils.read_datastructure import generate_indexed_datastructure, get_img_shape
 from utils.dense_transforms import Calibration, get_calib_from_json
-from AB3DMOT_libs.model_dense import associate_radar_to_trackers
 from dense_tracker import Tracker
 
 # DENSE = Path.home() / 'ObjectDetection/data/external/SeeingThroughFog'
@@ -26,8 +25,10 @@ DENSE = Path.home() / 'ObjectDetection/data/external/SprayAugmentation/2021-07-2
 # DENSE = '/media/dscheub/Data_Spray/2021-07-26_19-17-21'
 STF = Path.home() / 'ObjectDetection/AB3DMOT/SeeingThroughFog'
 
-RUN_TRACKER = True
+RUN_TRACKER = False
 USE_RADAR = True
+DRAW_3D = True
+DRAW_ANCHORED = True
 
 
 def reproject_camera_bbox(labels, calib, img_shape):
@@ -119,18 +120,29 @@ class DenseDrawer:
                     cv2.putText(self.current_image, str(track_id), (marker_pos[0], marker_pos[1] + 20), self.font, 0.5, (0, 255, 0))
             """
 
-        
-    def _draw_bbox_from_label(self, image, label, top_text=None, bottom_text=None, font_scale=0.5):
+    def _draw_bbox_from_label(self, image, label, draw_3D=DRAW_3D, top_text=None, bottom_text=None, font_scale=0.5):
 
         if label['identity'] not in ['Car', 'PassengerCar', 'RidableVehicle']:
             return image
 
+        x = tuple((label['xleft'], label['ytop']))
+        y = tuple((label['xright'], label['ybottom']))
         bbox_color_rgb = label['color']
         bbox_color = (bbox_color_rgb[2], bbox_color_rgb[1], bbox_color_rgb[0])
 
-        x = tuple((label['xleft'], label['ytop']))
-        y = tuple((label['xright'], label['ybottom']))
-        cv2.rectangle(image, x, y, bbox_color, 2)
+        if draw_3D:
+            bbox = np.asarray([label['posx'], label['posy'], label['posz'], label['length'],
+                               label['height'], label['width'], label['orient3d']])
+            bbox = bbox.reshape((1, -1))
+            corners3d = boxes3d_to_corners3d_kitti_camera(bbox)
+            box_img, corner_img = self.calib.corners3d_to_img_boxes(corners3d)
+            corner_img = np.int32(corner_img.reshape(8, 2))
+            for index in range(4):
+                image = cv2.line(image, tuple(corner_img[index]), tuple(corner_img[(index + 1) % 4]), bbox_color, 1)
+                image = cv2.line(image, tuple(corner_img[index + 4]), tuple(corner_img[(index + 1) % 4 + 4]), bbox_color, 1)
+                image = cv2.line(image, tuple(corner_img[index]), tuple(corner_img[index + 4]), bbox_color, 1)
+        else:
+            cv2.rectangle(image, x, y, bbox_color, 2)
 
         if top_text:
             cv2.putText(image, top_text, (x[0], x[1] - 10), self.font, font_scale, bbox_color)
@@ -146,7 +158,7 @@ class DenseDrawer:
 
         self.current_image = None
         self.labels = {'pred_label': [], 'gt_label': [], 'tracked': []}
-        self.radar_detections = None 
+        self.radar_detections = None
 
         for label_type in ['pred_label', 'gt_label']:
             label_path = current_frame[label_type]
@@ -156,10 +168,11 @@ class DenseDrawer:
                 for obj in label:
                     obj.update({'color': self.COLOR[label_type]})
                     label_list.append(obj)
-                objects_anchor = self.anchor.anchor_object_to_ground(current_frame['pc'], label, self.calib, self.img_shape)
-                for obj_anchor in objects_anchor:
-                    obj_anchor.update({'color': (255, 0, 0)})
-                    label_list.append(obj_anchor)
+                if DRAW_ANCHORED:
+                    objects_anchor = self.anchor.anchor_object_to_ground(current_frame['pc'], label, self.calib, self.img_shape)
+                    for obj_anchor in objects_anchor:
+                        obj_anchor.update({'color': (255, 0, 0)})
+                        label_list.append(obj_anchor)
                 self.labels[label_type] = label_list
 
         if RUN_TRACKER:
