@@ -5,6 +5,7 @@ import numpy as np
 import matplotlib.cm as cm
 import matplotlib as mpl
 from pathlib import Path
+from utils.planes import ObjectAnchor 
 
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QMainWindow, QGridLayout, QDesktopWidget, QPushButton
 from PyQt5.QtGui import QPixmap, QImage, QVector3D
@@ -19,10 +20,13 @@ from AB3DMOT_libs.model_dense import associate_radar_to_trackers
 from dense_tracker import Tracker
 
 # DENSE = Path.home() / 'ObjectDetection/data/external/SeeingThroughFog'
-DENSE = Path.home() / 'ObjectDetection/data/external/SprayAugmentation/2019-09-11_21-15-42'
+# DENSE = Path.home() / 'ObjectDetection/data/external/SprayAugmentation/2019-09-11_21-15-42'
+
+DENSE = Path.home() / 'ObjectDetection/data/external/SprayAugmentation/2021-07-26_19-17-21'
+# DENSE = '/media/dscheub/Data_Spray/2021-07-26_19-17-21'
 STF = Path.home() / 'ObjectDetection/AB3DMOT/SeeingThroughFog'
 
-RUN_TRACKER = True 
+RUN_TRACKER = True
 USE_RADAR = True
 
 
@@ -71,6 +75,8 @@ class DenseDrawer:
         self.current_image = None
         self.labels = {'pred_label': [], 'gt_label': [], 'tracked': []}
         self.radar_detections = None
+
+        self.anchor = ObjectAnchor(self.dense_data, 'single')
 
     def _draw_image(self):
 
@@ -150,6 +156,10 @@ class DenseDrawer:
                 for obj in label:
                     obj.update({'color': self.COLOR[label_type]})
                     label_list.append(obj)
+                objects_anchor = self.anchor.anchor_object_to_ground(current_frame['pc'], label, self.calib, self.img_shape)
+                for obj_anchor in objects_anchor:
+                    obj_anchor.update({'color': (255, 0, 0)})
+                    label_list.append(obj_anchor)
                 self.labels[label_type] = label_list
 
         if RUN_TRACKER:
@@ -198,7 +208,7 @@ class DenseViewer(QMainWindow):
 
         # dense_data = generate_dense_datastructure(root_dir, base_file, past_idx, future_idx)
         # dense_data = generate_indexed_datastructure(root_dir, 68, 300)
-        dense_data = generate_indexed_datastructure(root_dir)
+        dense_data = generate_indexed_datastructure(root_dir, 0)
         self.dense_drawer = DenseDrawer(dense_struct=dense_data, stf_path=stf_path)
 
         # Window settings

@@ -6,19 +6,61 @@ import copy
 # from sklearn.utils.linear_assignment_ import linear_assignment    # deprecated
 from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
-from AB3DMOT_libs.bbox_utils import convert_3dbox_to_8corner, iou3d
+from AB3DMOT_libs.bbox_utils import convert_3dbox_to_8corner, iou3d, roty
 from AB3DMOT_libs.kalman_filter_dense import KalmanBoxDenseTracker
 
 
-def associate_radar_to_trackers(radar_dets, tracker_dets, distance_threshold=2):
+DEBUG = False
+
+
+def associate_radar_to_trackers(radar_dets, tracker_dets, distance_threshold=2, metric='to_corner'):
     """
     radar_dets: N x 3 [[x_sc, y_sc, z_sc], ....] -> numpy array in camera coordinates
-    trackers: M x 3 [[bbox_x, bbox_y, bbox_z], ...]
+    trackers: M x 6 [[bbox_x, bbox_y, bbox_z, theta, l, w, h], ...]
     """
-    assert (radar_dets.shape[0] > 0) and (radar_dets.shape[1] == 3), str(radar_dets)
-    assert (tracker_dets.shape[0] > 0) and (tracker_dets.shape[1] == 3), str(tracker_dets)
+    assert (radar_dets.shape[0] > 0) and (radar_dets.shape[1] == 3), str(radar_dets) + str(type(radar_dets))
+    assert (tracker_dets.shape[0] > 0) and (tracker_dets.shape[1] == 7), str(tracker_dets)
 
-    distance_matrix = cdist(radar_dets, tracker_dets)
+    global DEBUG
+
+    assert metric in ['to_center', 'to_corner'], f'{metric} is not an available metric'
+    distance_matrix = np.ones((radar_dets.shape[0], tracker_dets.shape[0])) * np.inf
+    if metric == 'to_corner':
+        for idx in range(tracker_dets.shape[0]):
+            width = tracker_dets[idx, 5]
+            length = tracker_dets[idx, 4]
+            x_corners = (length / 2) * np.asarray([-1, -1, -1, 1, 1, 1])
+            z_corners = (width / 2) * np.asarray([1, 0, -1, -1, 0, 1])
+            y_corners = np.zeros_like(x_corners)
+            corners = np.dot(roty(tracker_dets[idx, 3]), np.vstack([x_corners, y_corners, z_corners]))
+            corners += tracker_dets[idx, :3].reshape(3, 1)
+            key_corners = np.transpose(corners)
+            if DEBUG:
+                print("########")
+                print("Key corners")
+                print(key_corners)
+                print("Center", tracker_dets[idx, :3])
+                print("lwh", tracker_dets[idx, -3:])
+                print("Angle: ", tracker_dets[idx, 3])
+
+            dist_to_radar = cdist(radar_dets, key_corners)
+            min_dist_to_radar = np.min(dist_to_radar, axis=1)
+            distance_vec = distance_matrix[:, idx]
+            distance_vec = np.where(min_dist_to_radar < distance_vec, min_dist_to_radar, distance_vec)
+            distance_matrix[:, idx] = distance_vec
+
+    else:
+        distance_matrix = cdist(radar_dets, tracker_dets[:, :3])
+
+    if DEBUG:
+        print("******")
+        print("Num radar: ", radar_dets.shape[0])
+        print("radar")
+        print(radar_dets)
+        print("Distance matrix")
+        print(distance_matrix)
+        print("******")
+
     radar_ind, tracker_ind = linear_sum_assignment(distance_matrix)
     assigned_idx = np.stack((radar_ind, tracker_ind), axis=1)
 
@@ -53,7 +95,10 @@ def associate_detections_to_trackers(detections, trackers, iou_threshold=0.01):
 
     for d, det in enumerate(detections):
         for t, trk in enumerate(trackers):
-            iou_matrix[d, t] = iou3d(det, trk)[0]             # det: 8 x 3, trk: 8 x 3
+            if np.linalg.norm(det-trk) < 1e-3:
+                iou_matrix[d, t] = 0
+            else:
+                iou_matrix[d, t] = iou3d(det, trk)[0]             # det: 8 x 3, trk: 8 x 3
     # matched_indices = linear_assignment(-iou_matrix)      # hougarian algorithm, compatible to linear_assignment in sklearn.utils
 
     row_ind, col_ind = linear_sum_assignment(-iou_matrix)      # hougarian algorithm
@@ -85,7 +130,7 @@ def associate_detections_to_trackers(detections, trackers, iou_threshold=0.01):
 
 
 class AB3DMOT(object):
-    def __init__(self, max_age=2, min_hits=5):      # max age will preserve the bbox does not appear no more than 2 frames, interpolate the detection
+    def __init__(self, max_age=4, min_hits=5):      # max age will preserve the bbox does not appear no more than 2 frames, interpolate the detection
         """
         TODO
         """
@@ -109,6 +154,12 @@ class AB3DMOT(object):
         self.trackers, self.trackers_over_time, trackers_over_time = [], [], []
         for frame in range(num_frames):
 
+            global DEBUG
+            if frame == 5:  #  and frame < 211:
+                DEBUG = False 
+            else:
+                DEBUG = False
+
             # Prepare data
             det, conf, radar = [], [], []
             if isinstance(dets[frame], np.ndarray):
@@ -119,13 +170,23 @@ class AB3DMOT(object):
                 radar = radar_dets[frame].reshape((-1, 5))
                 # Filter out radar detections without velocity
                 velocity_mask = radar[:, 3] > 0
+                radar_debug = radar[velocity_mask, :]
                 radar = radar[velocity_mask, 0:3]
+                if radar.size == 0:
+                    radar = []
+                if DEBUG:
+                    print("Num radar 3", radar.shape)
+                    print("Num radar debug 3", radar_debug.shape)
 
             # Run prediction and update step of Kalman Filter
             tracked_obj_in_frame = self.update(det, conf, radar)
             tracked_obj_in_frame_copy = copy.deepcopy(tracked_obj_in_frame)
             
             trackers_over_time.append(tracked_obj_in_frame_copy)
+
+            if DEBUG:
+                print(radar_debug)
+                print("Num radar", radar_debug.shape)
 
         # Eliminate all tracked obj that were never assigned a radar detection
         for tracked_obj_in_frame in reversed(trackers_over_time):
@@ -199,10 +260,12 @@ class AB3DMOT(object):
             for idx, trk in enumerate(self.trackers):
                 if trk.hits >= self.min_hits:
                     state = trk.get_state()
-                    xyz_camera.append([state[0], state[1], state[2]])
+                    xyz_camera.append(state)
             if xyz_camera:
                 xyz_camera = np.asarray(xyz_camera)
-                matches, _, _, = associate_radar_to_trackers(radar_dets, xyz_camera, distance_threshold=6)
+                if DEBUG:
+                    print("Num radar 2: ", radar_dets.shape)
+                matches, _, _, = associate_radar_to_trackers(radar_dets, xyz_camera, distance_threshold=1)
                 for match in matches:
                     self.trackers[match[1]].assign_radar()
 
@@ -248,27 +311,9 @@ if __name__ == "__main__":
     print("======= Test associate_radar_to_trackers =======")
     radar_dets = np.asarray([[5, 2, 3], [10, 10, 0], [20, 20, 10]])
     print("Radar dets:\n", radar_dets)
-    tracker_dets = np.asarray([[10, 9, 1], [5, 2, 4], [19, 20, 11]])
+    tracker_dets = np.asarray([[10, 9, 1, 0, 2, 1, 1], [5, 2, 4, 0, 3, 1, 1], [19, 20, 11, 0, 2, 1, 1]])
     print("Tracker_dets\n", tracker_dets)
     matches, unmatched_radar, unmatched_tracker = associate_radar_to_trackers(radar_dets, tracker_dets, distance_threshold=10)
-    print("Matches:\n",  matches)
-    print("Unmatched radar:\n", unmatched_radar)
-    print("Unmatched tracker:\n", unmatched_tracker)
-    print("=====================")
-    radar_dets = np.asarray([[5, 2, 3], [10, 10, 0]])
-    print("Radar dets:\n", radar_dets)
-    tracker_dets = np.asarray([[10, 9, 1], [5, 2, 4], [5, 2, 4.2], [19, 20, 11]])
-    print("Tracker_dets\n", tracker_dets)
-    matches, unmatched_radar, unmatched_tracker = associate_radar_to_trackers(radar_dets, tracker_dets, distance_threshold=1.1)
-    print("Matches:\n",  matches)
-    print("Unmatched radar:\n", unmatched_radar)
-    print("Unmatched tracker:\n", unmatched_tracker)
-    print("=====================")
-    radar_dets = np.asarray([])
-    print("Radar dets:\n", radar_dets)
-    tracker_dets = np.asarray([[10, 9, 1], [5, 2, 4], [5, 2, 4.2], [19, 20, 11]])
-    print("Tracker_dets\n", tracker_dets)
-    matches, unmatched_radar, unmatched_tracker = associate_radar_to_trackers(radar_dets, tracker_dets, distance_threshold=1.1)
     print("Matches:\n",  matches)
     print("Unmatched radar:\n", unmatched_radar)
     print("Unmatched tracker:\n", unmatched_tracker)

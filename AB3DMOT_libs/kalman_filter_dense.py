@@ -81,7 +81,8 @@ class KalmanBoxDenseTracker(object):
         self.kf.P = 10 * np.eye(self.dim_x)  # initial covariances
         self.kf.P[7:, 7:] *= 100  # give high uncertainty to the unobservable initial velocities, covariance matrix
 
-        self.kf.Q = 0.01 * np.eye(self.dim_x)  # process uncertainity
+        # self.kf.Q = 0.01 * np.eye(self.dim_x)  # process uncertainity
+        self.kf.Q = np.diag([0.01, 0.01, 0.1, 0.01, 0.0001, 0.0001, 0.0001, 0.01, 0.01, 0.1])
         self.kf.R = np.eye(self.dim_z)  # measurement uncertainty
 
         self.time_since_update = 0
@@ -96,11 +97,8 @@ class KalmanBoxDenseTracker(object):
 
         self.has_radar_assigned = False
 
-        if self.id == 17:
-            print(bbox3D, self.kf.x.T)
-
     def assign_radar(self):
-        print('Radar was assigned')
+        # print('Radar was assigned')
         self.has_radar_assigned = True
 
     def update(self, bbox3D, confidence_score):
@@ -133,9 +131,6 @@ class KalmanBoxDenseTracker(object):
         R = (1 / confidence_score**4) * self.kf.R
         self.kf.update(bbox3D, R=R)
         self.kf.x[3] = map_angle_to_range(self.kf.x[3])
-
-        if self.id == 17:
-            print(bbox3D, self.kf.x.T)
 
     def predict(self):
         """
