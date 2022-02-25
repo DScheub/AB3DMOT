@@ -50,7 +50,7 @@ class ObjectAnchor:
 
     def __init__(self, dataset, method):
 
-        assert method in ['mean', 'avg', 'buffer', 'single'], f'Unknown method {method}'
+        assert method in ['none', 'mean', 'avg', 'buffer', 'single'], f'Unknown method {method}'
 
         self.w = np.asarray([0, 0, 1])
         self.h = -1.65
@@ -62,6 +62,7 @@ class ObjectAnchor:
         self.buffer_h = [None for _ in range(self.buffer_size)]
 
         self.use_single = False
+        self.use_none = False
 
         if method == 'mean':
             w_stacked = np.zeros((3, len(dataset)))
@@ -86,6 +87,8 @@ class ObjectAnchor:
             self.use_buffer = True
         elif method == 'single':
             self.use_single = True
+        elif method == 'none':
+            self.use_none = True
 
     def anchor_object_to_ground(self, pc_path, objects, calib, img_shape):
 
@@ -100,39 +103,35 @@ class ObjectAnchor:
                     self.h = (self.h*i + h) / (i + 1)
                     i += 1
             self.buffer_index += 1
-
         elif self.use_single:
             pc = np.fromfile(pc_path, dtype=np.float32).reshape(-1, 5)
             self.w, self.h, _ = calculate_plane(pc)
+        elif self.use_none:
+            return objects
 
         ground_normal, dist_lidar_to_ground = self.w, self.h  # lidar coord
-        # ground_normal = np.asarray([-ground_normal[1], -ground_normal[2], ground_normal[0]])  # camera coord
-        ground_normal = np.dot(calib.V2C[:3, :3], ground_normal)  # camera coord
-        # print(f'{ground_normal=}')
-        # print(f'{dist_lidar_to_ground=}')
-        # print('==================')
+        print(f'Before .... {ground_normal=}')
+        print(f'{calib.V2C=}')
+        # ground_normal = np.dot(calib.V2C[:3, :3], ground_normal)  # camera coord
+        # ground_normal[2] = 0
+        # ground_normal = np.asarray([-ground_normal[1], -ground_normal[2], ground_normal[0]])
+        ground_normal = np.asarray([0, -1, 0])
+        ground_normal = ground_normal / np.linalg.norm(ground_normal)
+        # ground_normal = np.asarray([0, -1, 0])
+        print(f'After .... {ground_normal=}')
+        print(f'{dist_lidar_to_ground=}')
+        print('==================')
 
         objects_anchored = []
         for obj in objects:
-            # self.w, self.h, _ = calculate_plane(pc, x_of_interest=obj['posx_lidar'])
-            # ground_normal, dist_lidar_to_ground = self.w, self.h  # lidar coord
-            # ground_normal = np.dot(calib.V2C[:3, :3], ground_normal)  # camera coord
 
             base_old = np.asarray([obj['posx'], obj['posy'], obj['posz']])  # cammera coord
-            # print(f'{base_old=}')
-            pc = np.fromfile(pc_path, np.float32).reshape(-1, 5)
-            # ground_normal, dist_lidar_to_ground = calculate_averaged_planes(dataset)  # lidar coord
-            if dist_lidar_to_ground > 0:
-                print(f'Unlikely: ground normal lidar coord: {ground_normal}, dist: {dist_lidar_to_ground}')
-                objects_anchored.append(obj)
-                continue
-            # print(f'{ground_normal=}')
-            # print(f'{dist_lidar_to_ground=}')
+            print(f'{base_old=}')
 
             dist_base_to_ground = np.dot(ground_normal, base_old) - dist_lidar_to_ground
-            # print(f'{dist_base_to_ground=}')
+            print(f'{dist_base_to_ground=}')
             base_new = base_old - dist_base_to_ground*ground_normal
-            # print(f'{base_new=}')
+            print(f'{base_new=}')
             
             obj_anchored = obj.copy()
             obj_anchored['posx'], obj_anchored['posy'], obj_anchored['posz'] = base_new[0], base_new[1], base_new[2]
@@ -171,19 +170,18 @@ if __name__ == "__main__":
     import open3d as o3d
 
     stf_path = '/lhome/dscheub/ObjectDetection/AB3DMOT/SeeingThroughFog'
-    idx = 70 
-    # data_path = '/lhome/dscheub/ObjectDetection/data/external/SprayAugmentation/2019-09-11_21-15-42'
-    data_path = '/lhome/dscheub/ObjectDetection/data/external/SprayAugmentation/2021-07-26_19-17-21/'
-    # pc_path = f'{data_path}/lidar_hdl64_s3/velodyne_pointclouds/strongest_echo/00072_1568229354102870000.bin'
+    # data_path = '/lhome/dscheub/ObjectDetection/data/external/SprayAugmentation/2021-07-26_19-17-21/'
+    data_path = '/lhome/dscheub/ObjectDetection/data/external/SeqData/2018-10-29_14-35-02'
+    label_type = 'pred_label'
 
     dense_dataset = generate_indexed_datastructure(data_path)
     calib = Calibration(get_calib_from_json(stf_path=stf_path))
 
     idx = 0
     pc = np.fromfile(dense_dataset[idx]['pc'], dtype=np.float32)
-    obj_list = get_kitti_object_list(dense_dataset[idx]['tracked_label'], calib.C2V)
+    obj_list = get_kitti_object_list(dense_dataset[idx][label_type], calib.C2V)
     pc = pc.reshape((-1, 5))
-    w, h, pc_ground = calculate_plane(pc, x_of_interest=obj_list[0]['posx_lidar'])
+    w, h, pc_ground = calculate_plane(pc)
     print("posx_lidar: ",  obj_list[0]['posx_lidar'])
     print("w: ", w)
     print("h: ", h) 
@@ -198,27 +196,14 @@ if __name__ == "__main__":
     # base_new_lidar = base_new_lidar.reshape(1, 3)
     # base_new.points = o3d.utility.Vector3dVector(base_new_lidar)
     # base_new.paint_uniform_color([0, 1.0, 0])
+
+    anchor = ObjectAnchor(dense_dataset, 'single')
+    obj_list = get_kitti_object_list(dense_dataset[idx][label_type], calib.C2V)
+    obj_list_anchored = anchor.anchor_object_to_ground(dense_dataset[idx]['pc'], obj_list, calib, [1920, 1080])
+    for idx in range(len(obj_list)):
+        obj = obj_list[idx]
+        obj_anchored = obj_list_anchored[idx]
+        print('posz_lidar: ', obj['posz_lidar'], ', ', obj_anchored['posz_lidar'])
+        print('height: ', obj['height'], ', ', obj_anchored['height'])
+
     o3d.visualization.draw_geometries([pc_draw, ground_draw])
-
-    asdfasd
-
-
-    anchor = ObjectAnchor(dense_dataset, 'mean')
-    print(f'Mean: w = {anchor.w}, h = {anchor.h}')
-    anchor = ObjectAnchor(dense_dataset, 'avg')
-    print(f'Avg: w = {anchor.w}, h = {anchor.h}')
-
-    anchor = ObjectAnchor(dense_dataset, 'buffer')
-    for i, frame in enumerate(dense_dataset):
-        obj_list = get_kitti_object_list(frame['tracked_label'], calib.C2V)
-        # obj = obj_list[0]
-        anchor.anchor_object_to_ground(frame['pc'], obj_list, calib, [1920, 1080])
-        if i % 100 == 0:
-            print(f'Buffer: w = {anchor.w}, h = {anchor.h}')
-
-    pc = np.fromfile(pc_path, dtype=np.float32)
-    pc = pc.reshape((-1, 5))
-    w, h, pc_ground = calculate_plane(pc)
-    print("w: ", w)
-    print("h: ", h) 
-
