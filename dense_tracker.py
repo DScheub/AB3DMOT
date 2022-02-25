@@ -21,7 +21,7 @@ class Tracker:
         self.calib = Calibration(get_calib_from_json(stf_path, sensor_type='hdl64'))
         self.img_shape = get_img_shape(dense_struct[0]['img'])
 
-        self.anchor = ObjectAnchor(dense_struct, 'single')
+        self.anchor = ObjectAnchor(dense_struct, 'none')
 
         # Loop over all frames in dense_struct and prepare data
         dets = []
@@ -87,13 +87,15 @@ class Tracker:
                 # box_camera_img [x1, y1, x2, y2]
                 box_camera_img = boxes3d_kitti_camera_to_imageboxes(box_camera, self.calib, self.img_shape)
 
+                angle = np.arctan2(box_camera[0, 0], box_camera[0, 2]) + box_camera[0, 6]
+
                 box_camera = box_camera.reshape(-1)
                 box_camera_img = box_camera_img.reshape(-1)
                 qt = Quaternion(axis=[0, 0, 1], angle=box_camera[6] + np.pi/2)
                 tracked_obj_label = {'identity': 'Car',
                                      'trunctuated': -1,
                                      'occlusion': -1,
-                                     'angle': -1,
+                                     'angle': angle,
                                      'xleft': int(box_camera_img[0]),
                                      'ytop': int(box_camera_img[1]),
                                      'xright': int(box_camera_img[2]),
@@ -141,8 +143,9 @@ if __name__ == "__main__":
     # seq_path = '/lhome/dscheub/ObjectDetection/data/external/SprayAugmentation/2019-09-11_21-15-42'
     # seq_path = '/media/dscheub/Data_Spray/2021-07-26_19-17-21'
     # drive_path = '/media/dscheub/Data_Spray'
+    drive_path = '/lhome/dscheub/ObjectDetection/data/external/SprayAugmentation'
     for rec_dir in os.listdir(drive_path):
-        if '2021' in rec_dir:
+        if '2021' or '2019' in rec_dir:
             seq_path = os.path.join(drive_path, rec_dir)
             label_path = f'{seq_path}/labels/tracked_labels'
             if os.path.exists(label_path):

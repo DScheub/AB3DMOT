@@ -10,18 +10,13 @@ from AB3DMOT_libs.bbox_utils import convert_3dbox_to_8corner, iou3d, roty
 from AB3DMOT_libs.kalman_filter_dense import KalmanBoxDenseTracker
 
 
-DEBUG = False
-
-
-def associate_radar_to_trackers(radar_dets, tracker_dets, distance_threshold=2, metric='to_corner'):
+def associate_radar_to_trackers(radar_dets, tracker_dets, distance_threshold=2, metric='to_corner', debug=False):
     """
     radar_dets: N x 3 [[x_sc, y_sc, z_sc], ....] -> numpy array in camera coordinates
     trackers: M x 6 [[bbox_x, bbox_y, bbox_z, theta, l, w, h], ...]
     """
     assert (radar_dets.shape[0] > 0) and (radar_dets.shape[1] == 3), str(radar_dets) + str(type(radar_dets))
     assert (tracker_dets.shape[0] > 0) and (tracker_dets.shape[1] == 7), str(tracker_dets)
-
-    global DEBUG
 
     assert metric in ['to_center', 'to_corner'], f'{metric} is not an available metric'
     distance_matrix = np.ones((radar_dets.shape[0], tracker_dets.shape[0])) * np.inf
@@ -35,7 +30,7 @@ def associate_radar_to_trackers(radar_dets, tracker_dets, distance_threshold=2, 
             corners = np.dot(roty(tracker_dets[idx, 3]), np.vstack([x_corners, y_corners, z_corners]))
             corners += tracker_dets[idx, :3].reshape(3, 1)
             key_corners = np.transpose(corners)
-            if DEBUG:
+            if debug:
                 print("########")
                 print("Key corners")
                 print(key_corners)
@@ -51,15 +46,6 @@ def associate_radar_to_trackers(radar_dets, tracker_dets, distance_threshold=2, 
 
     else:
         distance_matrix = cdist(radar_dets, tracker_dets[:, :3])
-
-    if DEBUG:
-        print("******")
-        print("Num radar: ", radar_dets.shape[0])
-        print("radar")
-        print(radar_dets)
-        print("Distance matrix")
-        print(distance_matrix)
-        print("******")
 
     radar_ind, tracker_ind = linear_sum_assignment(distance_matrix)
     assigned_idx = np.stack((radar_ind, tracker_ind), axis=1)
@@ -154,12 +140,6 @@ class AB3DMOT(object):
         self.trackers, self.trackers_over_time, trackers_over_time = [], [], []
         for frame in range(num_frames):
 
-            global DEBUG
-            if frame == 5:  #  and frame < 211:
-                DEBUG = False 
-            else:
-                DEBUG = False
-
             # Prepare data
             det, conf, radar = [], [], []
             if isinstance(dets[frame], np.ndarray):
@@ -170,23 +150,14 @@ class AB3DMOT(object):
                 radar = radar_dets[frame].reshape((-1, 5))
                 # Filter out radar detections without velocity
                 velocity_mask = radar[:, 3] > 0
-                radar_debug = radar[velocity_mask, :]
                 radar = radar[velocity_mask, 0:3]
                 if radar.size == 0:
                     radar = []
-                if DEBUG:
-                    print("Num radar 3", radar.shape)
-                    print("Num radar debug 3", radar_debug.shape)
 
             # Run prediction and update step of Kalman Filter
             tracked_obj_in_frame = self.update(det, conf, radar)
             tracked_obj_in_frame_copy = copy.deepcopy(tracked_obj_in_frame)
-            
             trackers_over_time.append(tracked_obj_in_frame_copy)
-
-            if DEBUG:
-                print(radar_debug)
-                print("Num radar", radar_debug.shape)
 
         # Eliminate all tracked obj that were never assigned a radar detection
         for tracked_obj_in_frame in reversed(trackers_over_time):
@@ -263,9 +234,7 @@ class AB3DMOT(object):
                     xyz_camera.append(state)
             if xyz_camera:
                 xyz_camera = np.asarray(xyz_camera)
-                if DEBUG:
-                    print("Num radar 2: ", radar_dets.shape)
-                matches, _, _, = associate_radar_to_trackers(radar_dets, xyz_camera, distance_threshold=1)
+                matches, _, _, = associate_radar_to_trackers(radar_dets, xyz_camera, distance_threshold=2)
                 for match in matches:
                     self.trackers[match[1]].assign_radar()
 
@@ -279,7 +248,7 @@ class AB3DMOT(object):
         i = len(self.trackers)
         for trk in reversed(self.trackers):
             # if ((trk.time_since_update < self.max_age) and (trk.hits >= self.min_hits or self.frame_count <= self.min_hits)):
-                # ret.append(np.concatenate((trk.get_state(), [trk.id + 1, 1 if trk.has_radar_assigned else 0])).reshape(1, -1))
+            #   ret.append(np.concatenate((trk.get_state(), [trk.id + 1, 1 if trk.has_radar_assigned else 0])).reshape(1, -1))
             good_trackers.append(trk)
             i -= 1
             # remove dead tracklet

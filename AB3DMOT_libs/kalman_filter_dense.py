@@ -19,6 +19,7 @@ class KalmanBoxDenseTracker(object):
     """
 
     count = 0
+    penalize_angular_vel = True
 
     def __init__(self, bbox3D, confidence_score):
         """
@@ -128,7 +129,13 @@ class KalmanBoxDenseTracker(object):
                 self.kf.x[3] -= np.pi * 2
 
         # Update kf with detections
-        R = (1 / confidence_score**4) * self.kf.R
+        R = (1 / confidence_score**2) * self.kf.R
+        if self.penalize_angular_vel:
+            angular_dev = bbox3D[3] - self.kf.x[3]
+            R[0, 0] += 100 * (angular_dev * (12 / np.pi))**2
+            R[3, 3] += 5000 * (angular_dev * (12 / np.pi))**2
+            # if self.id == 0:
+                # print(f'Penalty R:\n {np.diagonal(R)}')
         self.kf.update(bbox3D, R=R)
         self.kf.x[3] = map_angle_to_range(self.kf.x[3])
 

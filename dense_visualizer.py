@@ -6,6 +6,7 @@ import matplotlib.cm as cm
 import matplotlib as mpl
 from pathlib import Path
 from utils.planes import ObjectAnchor
+import time
 
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QMainWindow, QGridLayout, QDesktopWidget, QPushButton
 from PyQt5.QtGui import QPixmap, QImage, QVector3D
@@ -20,15 +21,16 @@ from dense_tracker import Tracker
 
 # DENSE = Path.home() / 'ObjectDetection/data/external/SeeingThroughFog'
 # DENSE = Path.home() / 'ObjectDetection/data/external/SprayAugmentation/2019-09-11_21-15-42'
-
-DENSE = Path.home() / 'ObjectDetection/data/external/SprayAugmentation/2021-07-26_19-17-21'
 # DENSE = '/media/dscheub/Data_Spray/2021-07-26_19-17-21'
+DENSE = Path.home() / 'ObjectDetection/data/external/SprayAugmentation/2021-07-26_19-17-21'
+# DENSE = Path.home() / 'ObjectDetection/data/external/SeqData/2018-10-29_14-35-02'
 STF = Path.home() / 'ObjectDetection/AB3DMOT/SeeingThroughFog'
 
 RUN_TRACKER = False
 USE_RADAR = True
+FILTER_RADAR = False
 DRAW_3D = True
-DRAW_ANCHORED = True
+DRAW_ANCHORED = False
 
 
 def reproject_camera_bbox(labels, calib, img_shape):
@@ -71,7 +73,10 @@ class DenseDrawer:
         self.calib = Calibration(get_calib_from_json(STF))
         self.img_shape = get_img_shape(self.dense_data[0]['img'])
         if RUN_TRACKER:
+            start = time.time()
+            print("Running tracker")
             self.tracker = Tracker(self.dense_data, stf_path)
+            print("Running tracker finished. Elapsed time: ", time.time() - start)
 
         self.current_image = None
         self.labels = {'pred_label': [], 'gt_label': [], 'tracked': []}
@@ -90,7 +95,8 @@ class DenseDrawer:
         cv2.putText(self.current_image, f'Timestep: {timestamp}', (10, 50), self.font, self.font_scale, (0, 255, 0))
 
         for pred_label in self.labels['pred_label']:
-            self.current_image = self._draw_bbox_from_label(self.current_image, pred_label, top_text='Score: %.2f' % pred_label['score'])
+            reprojected_label = reproject_camera_bbox([pred_label], self.calib, self.img_shape)
+            self.current_image = self._draw_bbox_from_label(self.current_image, reprojected_label[0], top_text='Score: %.2f' % pred_label['score'])
 
         for gt_label in self.labels['gt_label']:
             self.current_image = self._draw_bbox_from_label(self.current_image, gt_label)
@@ -99,12 +105,13 @@ class DenseDrawer:
             self.current_image = self._draw_bbox_from_label(self.current_image, tracked_obj, bottom_text='ID: %s' % tracked_obj['id'])
 
         if self.radar_detections is not None:
+            print(f'{self.radar_detections=}')
             pts_camera = self.calib.radar_to_rect(self.radar_detections[:, :3])
             pts_img, _ = self.calib.rect_to_img(pts_camera)
             for idx, pt in enumerate(pts_img):
-                if self.radar_detections[idx, 3] > 0:
-                    marker_pos = tuple((int(pt[0]), int(pt[1])))
-                    cv2.drawMarker(self.current_image, marker_pos, (200, 200, 200), markerType=cv2.MARKER_STAR, markerSize=10, thickness=2)
+                # if self.radar_detections[idx, 3] > 0 and FILTER_RADAR:
+                marker_pos = tuple((int(pt[0]), int(pt[1])))
+                cv2.drawMarker(self.current_image, marker_pos, (200, 200, 200), markerType=cv2.MARKER_STAR, markerSize=10, thickness=2)
             """
             tracker_dets = np.zeros((len(self.labels['tracked']), 3))
             for idx, obj in enumerate(self.labels['tracked']):
@@ -188,7 +195,10 @@ class DenseDrawer:
             if current_frame['radar']:
                 pts_radar = load_radar_points(self.dense_data[self.index]['radar'])
                 pts_radar = np.asarray(pts_radar)  # [[x_sc, y_sc, 0, rVelGround, rDist], ...] (N, 5)
-                self.radar_detections = pts_radar[pts_radar[:, 3] > 0, :]  # Eliminate dets with 0 velocity
+                if FILTER_RADAR:
+                    self.radar_detections = pts_radar[pts_radar[:, 3] > 0, :]  # Eliminate dets with 0 velocity
+                else:
+                    self.radar_detections = pts_radar  # Every radar det
 
         self._draw_image()
 
@@ -221,7 +231,7 @@ class DenseViewer(QMainWindow):
 
         # dense_data = generate_dense_datastructure(root_dir, base_file, past_idx, future_idx)
         # dense_data = generate_indexed_datastructure(root_dir, 68, 300)
-        dense_data = generate_indexed_datastructure(root_dir, 0)
+        dense_data = generate_indexed_datastructure(root_dir, 0, 1000)
         self.dense_drawer = DenseDrawer(dense_struct=dense_data, stf_path=stf_path)
 
         # Window settings
