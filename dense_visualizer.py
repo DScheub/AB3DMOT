@@ -20,15 +20,15 @@ from utils.dense_transforms import Calibration, get_calib_from_json
 from dense_tracker import Tracker
 
 # DENSE = Path.home() / 'ObjectDetection/data/external/SeeingThroughFog'
-# DENSE = Path.home() / 'ObjectDetection/data/external/SprayAugmentation/2019-09-11_21-15-42'
+DENSE = Path.home() / 'ObjectDetection/data/external/SprayAugmentation/2019-09-11_21-15-42'
 # DENSE = '/media/dscheub/Data_Spray/2021-07-26_19-17-21'
-DENSE = Path.home() / 'ObjectDetection/data/external/SprayAugmentation/2021-07-26_19-17-21'
+# DENSE = Path.home() / 'ObjectDetection/data/external/SprayAugmentation/2021-07-26_19-17-21'
 # DENSE = Path.home() / 'ObjectDetection/data/external/SeqData/2018-10-29_14-35-02'
 STF = Path.home() / 'ObjectDetection/AB3DMOT/SeeingThroughFog'
 
-RUN_TRACKER = False
+RUN_TRACKER = True
 USE_RADAR = True
-FILTER_RADAR = False
+FILTER_RADAR = True
 DRAW_3D = True
 DRAW_ANCHORED = False
 
@@ -105,7 +105,6 @@ class DenseDrawer:
             self.current_image = self._draw_bbox_from_label(self.current_image, tracked_obj, bottom_text='ID: %s' % tracked_obj['id'])
 
         if self.radar_detections is not None:
-            print(f'{self.radar_detections=}')
             pts_camera = self.calib.radar_to_rect(self.radar_detections[:, :3])
             pts_img, _ = self.calib.rect_to_img(pts_camera)
             for idx, pt in enumerate(pts_img):
@@ -162,6 +161,9 @@ class DenseDrawer:
 
         assert self.index < self.num_data, f'Index {self.index} is out of range. Elements in dataset: {self.num_data}'
         current_frame = self.dense_data[self.index]
+
+        print(current_frame['pc'])
+        print(current_frame['pred_label'])
 
         self.current_image = None
         self.labels = {'pred_label': [], 'gt_label': [], 'tracked': []}
@@ -231,7 +233,7 @@ class DenseViewer(QMainWindow):
 
         # dense_data = generate_dense_datastructure(root_dir, base_file, past_idx, future_idx)
         # dense_data = generate_indexed_datastructure(root_dir, 68, 300)
-        dense_data = generate_indexed_datastructure(root_dir, 0, 1000)
+        dense_data = generate_indexed_datastructure(root_dir, 0, 200)
         self.dense_drawer = DenseDrawer(dense_struct=dense_data, stf_path=stf_path)
 
         # Window settings

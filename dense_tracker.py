@@ -13,6 +13,8 @@ from pcdet.utils.box_utils import boxes3d_kitti_camera_to_imageboxes
 
 class Tracker:
 
+    FILTER_RADAR = True
+
     def __init__(self, dense_struct, stf_path):
 
         self.tracked_objects = []
@@ -64,6 +66,8 @@ class Tracker:
             radar_dets_per_frame = [] 
             if 'radar' in predictions.keys():
                 pts_radar = load_radar_points(predictions['radar'])
+                if self.FILTER_RADAR:
+                    pts_radar = pts_radar[pts_radar[:, 3] > 0]
                 if pts_radar.size > 0:
                     pts_radar_cam = self.calib.radar_to_rect(pts_radar[:, :3]).reshape((-1, 3))
                     radar_dets_per_frame = np.concatenate((pts_radar_cam, pts_radar[:, 3:]), axis=1)

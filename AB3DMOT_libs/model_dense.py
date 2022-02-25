@@ -10,7 +10,58 @@ from AB3DMOT_libs.bbox_utils import convert_3dbox_to_8corner, iou3d, roty
 from AB3DMOT_libs.kalman_filter_dense import KalmanBoxDenseTracker
 
 
-def associate_radar_to_trackers(radar_dets, tracker_dets, distance_threshold=2, metric='to_corner', debug=False):
+def dist_to_rectangle(corners_rectangle, pts, debug=False):
+    """
+    Calculate distance of points to the edges of a BeV BBox
+    corners_rectangle: (2, 4) in camera coordinates of bbox in BeV
+    pts; (2, N) radar detections in camera coordinates
+    """
+
+    dims = np.asarray([0.0, 0.0])
+
+    w = corners_rectangle[:, 0]
+    u = (corners_rectangle[:, 1] - w)
+    dims[0] = np.linalg.norm(u)
+    u = u / dims[0]
+    v = (corners_rectangle[:, 3] - w)
+    dims[1] = np.linalg.norm(v)
+    v = v / dims[1]
+    if debug:
+        print(f'{u=}')
+        print(f'{v=}')
+        print(f'{dims=}')
+
+    T = np.zeros((2, 2))
+    T[:, 0], T[:, 1] = u, v
+    T_inv = np.linalg.inv(T)
+    pts_rect = T_inv.dot(pts - w.reshape(2, 1))
+    if debug:
+        print(f'{pts=}')
+        print(f'{pts_rect=}')
+
+    dist = np.inf
+    zeros = np.zeros_like(pts_rect)
+    du = np.max(np.vstack((zeros[0, :], pts_rect[0, :] - dims[0], -pts_rect[0, :])), axis=0)
+    dv = np.max(np.vstack((zeros[1, :], pts_rect[1, :] - dims[1], -pts_rect[1, :])), axis=0)
+    dist = np.sqrt(du**2 + dv**2)
+
+    if debug:
+
+        print(f'{du=}')
+        print(f'{dv=}')
+        print(f'{dist=}')
+
+        import matplotlib.pyplot as plt 
+        plt.plot(np.hstack((corners_rectangle[0, :], corners_rectangle[0, 0])), np.hstack((corners_rectangle[1, :], corners_rectangle[1, 0])),
+                 pts[0, :], pts[1, :], 'g^')
+        plt.axis('square')
+        plt.grid(True)
+        plt.show()
+
+    return dist
+
+
+def associate_radar_to_trackers(radar_dets, tracker_dets, distance_threshold=2, metric='to_rect', debug=False):
     """
     radar_dets: N x 3 [[x_sc, y_sc, z_sc], ....] -> numpy array in camera coordinates
     trackers: M x 6 [[bbox_x, bbox_y, bbox_z, theta, l, w, h], ...]
@@ -18,31 +69,20 @@ def associate_radar_to_trackers(radar_dets, tracker_dets, distance_threshold=2, 
     assert (radar_dets.shape[0] > 0) and (radar_dets.shape[1] == 3), str(radar_dets) + str(type(radar_dets))
     assert (tracker_dets.shape[0] > 0) and (tracker_dets.shape[1] == 7), str(tracker_dets)
 
-    assert metric in ['to_center', 'to_corner'], f'{metric} is not an available metric'
+    assert metric in ['to_center', 'to_rect'], f'{metric} is not an available metric'
     distance_matrix = np.ones((radar_dets.shape[0], tracker_dets.shape[0])) * np.inf
-    if metric == 'to_corner':
+    if metric == 'to_rect':
         for idx in range(tracker_dets.shape[0]):
             width = tracker_dets[idx, 5]
             length = tracker_dets[idx, 4]
-            x_corners = (length / 2) * np.asarray([-1, -1, -1, 1, 1, 1])
-            z_corners = (width / 2) * np.asarray([1, 0, -1, -1, 0, 1])
+            # Irgendwie um pi/2 gedreht ??
+            x_corners = (length / 2) * np.asarray([-1, 1, 1, -1])
+            z_corners = (width / 2) * np.asarray([1, 1, -1, -1])
             y_corners = np.zeros_like(x_corners)
-            corners = np.dot(roty(tracker_dets[idx, 3]), np.vstack([x_corners, y_corners, z_corners]))
-            corners += tracker_dets[idx, :3].reshape(3, 1)
-            key_corners = np.transpose(corners)
-            if debug:
-                print("########")
-                print("Key corners")
-                print(key_corners)
-                print("Center", tracker_dets[idx, :3])
-                print("lwh", tracker_dets[idx, -3:])
-                print("Angle: ", tracker_dets[idx, 3])
-
-            dist_to_radar = cdist(radar_dets, key_corners)
-            min_dist_to_radar = np.min(dist_to_radar, axis=1)
-            distance_vec = distance_matrix[:, idx]
-            distance_vec = np.where(min_dist_to_radar < distance_vec, min_dist_to_radar, distance_vec)
-            distance_matrix[:, idx] = distance_vec
+            corners_rectangle = np.dot(roty(tracker_dets[idx, 3]), np.vstack([x_corners, y_corners, z_corners]))
+            corners_2D = corners_rectangle[(0, 2), :]
+            corners_2D += tracker_dets[idx, (0, 2)].reshape(2, 1)
+            distance_matrix[:, idx] = dist_to_rectangle(corners_2D, radar_dets[:, (0, 2)].T, debug=debug)
 
     else:
         distance_matrix = cdist(radar_dets, tracker_dets[:, :3])
@@ -234,7 +274,7 @@ class AB3DMOT(object):
                     xyz_camera.append(state)
             if xyz_camera:
                 xyz_camera = np.asarray(xyz_camera)
-                matches, _, _, = associate_radar_to_trackers(radar_dets, xyz_camera, distance_threshold=2)
+                matches, _, _, = associate_radar_to_trackers(radar_dets, xyz_camera, distance_threshold=1)
                 for match in matches:
                     self.trackers[match[1]].assign_radar()
 
@@ -277,13 +317,62 @@ class AB3DMOT(object):
 
 if __name__ == "__main__":
 
-    print("======= Test associate_radar_to_trackers =======")
-    radar_dets = np.asarray([[5, 2, 3], [10, 10, 0], [20, 20, 10]])
-    print("Radar dets:\n", radar_dets)
-    tracker_dets = np.asarray([[10, 9, 1, 0, 2, 1, 1], [5, 2, 4, 0, 3, 1, 1], [19, 20, 11, 0, 2, 1, 1]])
-    print("Tracker_dets\n", tracker_dets)
-    matches, unmatched_radar, unmatched_tracker = associate_radar_to_trackers(radar_dets, tracker_dets, distance_threshold=10)
+    ###### dist_to_rectangle ########
+    # camera coord 2D [x, z]
+    # center = np.asarray([1, 10])
+    # angle_deg = 10
+    # length, width, angle = 4, 2, angle_deg * np.pi / 180.0
+    # x_corners = (width / 2) * np.asarray([-1, 1, 1, -1])
+    # z_corners = (length / 2) * np.asarray([1, 1, -1, -1])
+    # y_corners = np.zeros_like(x_corners)
+    # corners_rectangle = np.dot(roty(angle), np.vstack([x_corners, y_corners, z_corners]))
+    # corners_2D = corners_rectangle[(0, 2), :]
+    # corners_2D += center.reshape(2, 1)
+
+    # print(f'{corners_2D=}')
+    # pts = np.zeros((2, 4))
+    # pts[:, 0] = [1.4, 9.5]
+    # pts[:, 1] = [3, 9.5]
+    # pts[:, 2] = [1, 13]
+    # pts[:, 3] = [-1, 10]
+    # print(f'{pts=}')
+    # dist = dist_to_rectangle(corners_2D, pts, debug=True)
+    # print(f'{dist=}')
+
+    print(" ========== Read label ==============")
+    from utils.read_datastructure import generate_indexed_datastructure
+    from utils.dense_transforms import Calibration
+    from SeeingThroughFog.tools.DatasetViewer.lib.read import get_kitti_object_list, load_radar_points
+    idx = 10
+    data_path = '/lhome/dscheub/ObjectDetection/data/external/SprayAugmentation/2019-09-11_21-15-42'
+    stf_path = '/lhome/dscheub/ObjectDetection/SeeingThroughFog'
+    calib = Calibration(stf_path=stf_path)
+    dense_data = generate_indexed_datastructure(data_path)
+    frame = dense_data[idx]
+    objects = get_kitti_object_list(frame['pred_label'])
+    trackers = np.zeros((len(objects), 7))
+    for idx, obj in enumerate(objects):
+        trackers[idx, :] = np.asarray([obj['posx'], obj['posy'], obj['posz'], obj['orient3d'], obj['length'], obj['width'], obj['height']])
+    print(f'{trackers=}')
+    radar = load_radar_points(frame['radar'])
+    radar = radar[radar[:, 3] > 0]
+    radar_camera = calib.radar_to_rect(radar[:, :3])
+    matches, unmatched_radar, unmatched_tracker = associate_radar_to_trackers(radar_camera, trackers, debug=True)
     print("Matches:\n",  matches)
     print("Unmatched radar:\n", unmatched_radar)
     print("Unmatched tracker:\n", unmatched_tracker)
-    print("=====================")
+
+
+    # print("======= Test associate_radar_to_trackers =======")
+    # # trackers: M x 6 [[bbox_x, bbox_y, bbox_z, theta, l, w, h], ...]
+    # radar_dets = np.asarray([[0.5, 0, 10], [-0.8, 1, 5], [4.5, 1, 40]])
+    # print("Radar dets:\n", radar_dets)
+    # tracker_dets = np.asarray([[2, 1, 10, 0, 2, 1, 1], [-1, 2, 5, 0, 3, 1, 1], [5, 1, 40, 0, 2, 1, 1]])
+    # print("Tracker_dets\n", tracker_dets)
+    # matches, unmatched_radar, unmatched_tracker = associate_radar_to_trackers(radar_dets, tracker_dets, debug=True)
+    # print("Matches:\n",  matches)
+    # print("Unmatched radar:\n", unmatched_radar)
+    # print("Unmatched tracker:\n", unmatched_tracker)
+    # print("=====================")
+
+
