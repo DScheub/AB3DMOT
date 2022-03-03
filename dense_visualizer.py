@@ -1,6 +1,7 @@
 import sys
 import os
 import cv2
+import copy
 import numpy as np
 import matplotlib.cm as cm
 import matplotlib as mpl
@@ -8,8 +9,8 @@ from pathlib import Path
 from utils.planes import ObjectAnchor
 import time
 
-from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QMainWindow, QGridLayout, QDesktopWidget, QPushButton
-from PyQt5.QtGui import QPixmap, QImage, QVector3D
+from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QMainWindow, QGridLayout, QDesktopWidget, QPushButton, QComboBox, QLineEdit
+from PyQt5.QtGui import QPixmap, QImage, QVector3D, QDoubleValidator
 from PyQt5.Qt import Qt
 import pyqtgraph.opengl as gl
 
@@ -19,18 +20,18 @@ from utils.read_datastructure import generate_indexed_datastructure, get_img_sha
 from utils.dense_transforms import Calibration, get_calib_from_json
 from dense_tracker import Tracker
 
-# DENSE = Path.home() / 'ObjectDetection/data/external/SeeingThroughFog'
-# DENSE = Path.home() / 'ObjectDetection/data/external/SprayAugmentation/2019-09-11_21-15-42'
-# DENSE = '/media/dscheub/Data_Spray/2021-07-26_19-17-21'
-DENSE = Path.home() / 'ObjectDetection/data/external/SprayAugmentation/2021-07-26_19-17-21'
-# DENSE = Path.home() / 'ObjectDetection/data/external/SeqData/2018-10-29_14-35-02'
+# DENSE = Path.home() / 'ObjectDetection/data/external/SprayAugmentation/2019-09-11_21-15-42' # Atuobahn Nacht klar
+# DENSE = Path.home() / 'ObjectDetection/data/external/SprayAugmentation/2021-07-26_19-17-21' # G Klasse
+DENSE = Path.home() / 'ObjectDetection/data/external/SprayAugmentation/2021-07-28_18-21-02'  # CLA erst trocken bis ca 1000, dann nasse Fahrbahnahn bis ca 1365
+# DENSE = Path.home() / 'ObjectDetection/data/external/SeqData/2018-10-29_14-35-02' # Andrea
 STF = Path.home() / 'ObjectDetection/AB3DMOT/SeeingThroughFog'
 
-RUN_TRACKER = False 
+RUN_TRACKER = False
 USE_RADAR = True
 FILTER_RADAR = True
 DRAW_3D = True
 DRAW_ANCHORED = False
+PC_SUFFIX = '_egomotion'
 PRED_SUFFIX = '_egomotion'
 TRACKED_SUFFIX = None
 
@@ -60,7 +61,7 @@ class DenseDrawer:
              'gt_label': (255, 0, 0),
              'tracked': (0, 225, 0)}
 
-    def __init__(self, dense_struct, stf_path):
+    def __init__(self, dense_struct, stf_path, img_dim):
 
         assert dense_struct
 
@@ -70,7 +71,8 @@ class DenseDrawer:
         self.num_data = len(self.dense_data)
 
         self.font = cv2.FONT_HERSHEY_SIMPLEX
-        self.font_scale = 1
+        self.font_scale = 1.3
+        self.img_dim = img_dim
 
         self.calib = Calibration(get_calib_from_json(STF))
         self.img_shape = get_img_shape(self.dense_data[0]['img'])
@@ -82,7 +84,9 @@ class DenseDrawer:
             self.tracker.plot_tracectories()
 
         self.current_image = None
-        self.labels = {'pred_label': [], 'gt_label': [], 'tracked': []}
+        self.labels = {'pred_label': [], 'gt_label': [], 'tracked': [], 'relabeled': {}}
+        self.use_relabel = False 
+
         self.radar_detections = None
 
         self.anchor = ObjectAnchor(self.dense_data, 'single')
@@ -95,11 +99,18 @@ class DenseDrawer:
         self.current_image = cv2.imread(img_path)
 
         timestamp = self.dense_data[self.index]['frame_id']['idx']
-        cv2.putText(self.current_image, f'Timestep: {timestamp}', (10, 50), self.font, self.font_scale, (0, 255, 0))
+        cv2.putText(self.current_image, f'Timestep: {timestamp}', (10, 50), self.font, self.font_scale, (0, 255, 0), 1)
 
         for pred_label in self.labels['pred_label']:
             reprojected_label = reproject_camera_bbox([pred_label], self.calib, self.img_shape)
-            self.current_image = self._draw_bbox_from_label(self.current_image, reprojected_label[0], top_text='Score: %.2f' % pred_label['score'])
+            self.current_image = self._draw_bbox_from_label(self.current_image,
+                                                            reprojected_label[0],
+                                                            top_text='Score: %.2f' % pred_label['score'])
+        if self.use_relabel:
+            for obj in self.labels['relabeled'].values():
+                self.current_image = self._draw_bbox_from_label(self.current_image,
+                                                                obj,
+                                                                bottom_text='ID %s' % obj['relabel_id'])
 
         for gt_label in self.labels['gt_label']:
             self.current_image = self._draw_bbox_from_label(self.current_image, gt_label)
@@ -114,22 +125,10 @@ class DenseDrawer:
                 # if self.radar_detections[idx, 3] > 0 and FILTER_RADAR:
                 marker_pos = tuple((int(pt[0]), int(pt[1])))
                 cv2.drawMarker(self.current_image, marker_pos, (200, 200, 200), markerType=cv2.MARKER_STAR, markerSize=10, thickness=2)
-            """
-            tracker_dets = np.zeros((len(self.labels['tracked']), 3))
-            for idx, obj in enumerate(self.labels['tracked']):
-                tracker_dets[idx, :] = np.array([obj['posx'], obj['posy'], obj['posz']])
 
-            if tracker_dets.size:
-                matches, _, _, = associate_radar_to_trackers(pts_camera, tracker_dets, distance_threshold=2)
-                for match in matches:
-                    pt = pts_img[match[0], :]
-                    track_id = self.labels['tracked'][int(match[1])]['id']
-                    marker_pos = tuple((int(pt[0]), int(pt[1])))
-                    cv2.drawMarker(self.current_image, marker_pos, (0, 255, 0), markerType=cv2.MARKER_STAR, markerSize=10, thickness=2)
-                    cv2.putText(self.current_image, str(track_id), (marker_pos[0], marker_pos[1] + 20), self.font, 0.5, (0, 255, 0))
-            """
+        self.current_image = cv2.resize(self.current_image, self.img_dim)
 
-    def _draw_bbox_from_label(self, image, label, draw_3D=DRAW_3D, top_text=None, bottom_text=None, font_scale=0.5):
+    def _draw_bbox_from_label(self, image, label, draw_3D=DRAW_3D, top_text=None, bottom_text=None, font_scale=0.7):
 
         if label['identity'] not in ['Car', 'PassengerCar', 'RidableVehicle']:
             return image
@@ -151,7 +150,7 @@ class DenseDrawer:
                 image = cv2.line(image, tuple(corner_img[index + 4]), tuple(corner_img[(index + 1) % 4 + 4]), bbox_color, 1)
                 image = cv2.line(image, tuple(corner_img[index]), tuple(corner_img[index + 4]), bbox_color, 1)
         else:
-            cv2.rectangle(image, x, y, bbox_color, 2)
+            cv2.rectangle(image, x, y, bbox_color, 1)
 
         if top_text:
             cv2.putText(image, top_text, (x[0], x[1] - 10), self.font, font_scale, bbox_color)
@@ -160,13 +159,98 @@ class DenseDrawer:
 
         return image
 
+    def _prepare_data(self):
+
+        self._draw_image()
+
+        labels = []
+        for label_type, label in self.labels.items():
+            if label_type == 'relabeled':
+                if self.use_relabel:
+                    labels += label.values()
+            else:
+                labels += label
+
+        radar_dets_lidar = None
+        if self.radar_detections is not None:
+            radar_dets_lidar = self.calib.radar_to_lidar(self.radar_detections[:, :3])
+
+        return self.current_image, self.dense_data[self.index]['pc'], labels, radar_dets_lidar
+
+    def update_bbox(self, original_obj, pos_cam_x, pos_cam_y, pos_cam_z, length, width, height, orient3d):
+
+        updated_obj = copy.deepcopy(original_obj)
+
+        updated_obj['posx'] = pos_cam_x
+        updated_obj['posy'] = pos_cam_y
+        updated_obj['posz'] = pos_cam_z
+        updated_obj['length'] = length
+        updated_obj['width'] = width
+        updated_obj['height'] = height
+        updated_obj['orient3d'] = orient3d
+        updated_obj['rotx'] = 0.0
+        updated_obj['roty'] = 0.0
+        updated_obj['rotz'] = orient3d + np.pi / 2
+        updated_obj['score'] = 1.0
+
+        # Update 2D BBox
+        updated_obj = reproject_camera_bbox([updated_obj], self.calib, self.img_shape)[0]
+
+        # Update lidar pos
+        pos = np.asarray([updated_obj['posx'], updated_obj['posy'], updated_obj['posz'], 1])
+        pos_lidar = np.matmul(self.calib.C2V, pos.T)
+        updated_obj['posx_lidar'] = pos_lidar[0]
+        updated_obj['posy_lidar'] = pos_lidar[1]
+        updated_obj['posz_lidar'] = pos_lidar[2]
+
+        updated_obj['color'] = (255, 0, 255)
+
+        self.labels['relabeled'][updated_obj['relabel_id']] = updated_obj
+
+        return self._prepare_data()
+
+    def get_relabeled_objects(self):
+        return self.labels['relabeled'].values()
+
+    def select_relabeled_obj(self, obj_id):
+        # self.labels['relabeled'][obj_id]['color'] = (255, 0, 0)
+        return self._prepare_data()
+
+    def add_pred_obj(self):
+
+        dummy_obj = {}
+        dummy_obj['identity'] = 'Car'
+        dummy_obj['posx'] = 0.0
+        dummy_obj['posy'] = 0.0
+        dummy_obj['posz'] = 20.0
+        dummy_obj['length'] = 1.0
+        dummy_obj['width'] = 1.0
+        dummy_obj['height'] = 1.0
+        dummy_obj['orient3d'] = 0.0
+        dummy_obj['rotx'] = 0.0
+        dummy_obj['roty'] = 0.0
+        dummy_obj['rotz'] = np.pi / 2
+        dummy_obj['score'] = 0.0
+        dummy_obj = reproject_camera_bbox([dummy_obj], self.calib, self.img_shape)[0]
+        pos = np.asarray([dummy_obj['posx'], dummy_obj['posy'], dummy_obj['posz'], 1])
+        pos_lidar = np.matmul(self.calib.C2V, pos.T)
+        dummy_obj['posx_lidar'] = pos_lidar[0]
+        dummy_obj['posy_lidar'] = pos_lidar[1]
+        dummy_obj['posz_lidar'] = pos_lidar[2]
+        dummy_obj['relabel_id'] = len(self.labels['pred_label'])
+        dummy_obj['color'] = self.COLOR['pred_label']
+
+        self.labels['relabeled'].append(dummy_obj)
+
+        return self._prepare_data()
+
     def _update(self):
 
         assert self.index < self.num_data, f'Index {self.index} is out of range. Elements in dataset: {self.num_data}'
         current_frame = self.dense_data[self.index]
 
         self.current_image = None
-        self.labels = {'pred_label': [], 'gt_label': [], 'tracked': []}
+        self.labels = {'pred_label': [], 'gt_label': [], 'tracked': [], 'relabeled': {}}
         self.radar_detections = None
 
         for label_type in ['pred_label', 'gt_label']:
@@ -174,8 +258,9 @@ class DenseDrawer:
             label_list = []
             if label_path:
                 label = get_kitti_object_list(label_path, self.calib.C2V)
-                for obj in label:
+                for idx, obj in enumerate(label):
                     obj.update({'color': self.COLOR[label_type]})
+                    obj.update({'relabel_id': idx})
                     label_list.append(obj)
                 if DRAW_ANCHORED:
                     objects_anchor = self.anchor.anchor_object_to_ground(current_frame['pc'], label, self.calib, self.img_shape)
@@ -183,6 +268,11 @@ class DenseDrawer:
                         obj_anchor.update({'color': (255, 0, 0)})
                         label_list.append(obj_anchor)
                 self.labels[label_type] = label_list
+
+        for obj in self.labels['pred_label']:
+            relabel_obj = copy.deepcopy(obj)
+            relabel_obj['color'] = (255, 0, 255)
+            self.labels['relabeled'][obj['relabel_id']] = relabel_obj
 
         if RUN_TRACKER:
             tracked_objects_in_frame = self.tracker.get_tracked_objects_in_frame(self.index)
@@ -206,15 +296,7 @@ class DenseDrawer:
 
     def get_current_frame(self):
         self._update()
-        labels = []
-        for _, label in self.labels.items():
-            labels += label
-
-        radar_dets_lidar = None
-        if self.radar_detections is not None:
-            radar_dets_lidar = self.calib.radar_to_lidar(self.radar_detections[:, :3])
-
-        return self.current_image, self.dense_data[self.index]['pc'], labels, radar_dets_lidar
+        return self._prepare_data()
 
     def get_next_frame(self):
         self.index = (self.index + 1) % self.num_data
@@ -231,10 +313,18 @@ class DenseViewer(QMainWindow):
         super().__init__()
         # super().keyPressEvent() = self.keyPressEvent()
 
-        # dense_data = generate_dense_datastructure(root_dir, base_file, past_idx, future_idx)
-        # dense_data = generate_indexed_datastructure(root_dir, 68, 300)
-        dense_data = generate_indexed_datastructure(root_dir, 0, 200, pred_label_suffix=PRED_SUFFIX, tracked_label_suffix=TRACKED_SUFFIX)
-        self.dense_drawer = DenseDrawer(dense_struct=dense_data, stf_path=stf_path)
+        self.img_width = 1600
+        self.img_height = int(self.img_width * 9 / 16)
+
+        dense_data = generate_indexed_datastructure(root_dir, 0, 2000, 
+                                                    pc_suffix=PC_SUFFIX,
+                                                    pred_label_suffix=PRED_SUFFIX,
+                                                    tracked_label_suffix=TRACKED_SUFFIX)
+
+        self.dense_drawer = DenseDrawer(dense_struct=dense_data,
+                                        stf_path=stf_path,
+                                        img_dim=(self.img_width, self.img_height))
+        cv_img, pc_path, labels, radar_dets = self.dense_drawer.get_current_frame()
 
         # Window settings
         self.monitor = QDesktopWidget().screenGeometry(1)
@@ -253,8 +343,8 @@ class DenseViewer(QMainWindow):
         self.viewer = gl.GLViewWidget()
         self.grid_dimensions = 20
         self.viewer.setWindowTitle('drag & drop point cloud viewer')
-        self.viewer.setCameraPosition(distance=2 * self.grid_dimensions)
-        self.layout.addWidget(self.viewer, self.current_row, 0, 1, 3)
+        self.viewer.setCameraPosition(distance=2 * self.grid_dimensions, azimuth=180, elevation=45)
+        self.layout.addWidget(self.viewer, self.current_row, 0, 1, 6)
         self.grid = gl.GLGridItem()
         self.grid.setSize(self.grid_dimensions, self.grid_dimensions)
         self.grid.setSpacing(1, 1)
@@ -263,10 +353,8 @@ class DenseViewer(QMainWindow):
         self.point_size = 3
 
         # Image
-        self.img_width = 1920
-        self.img_height = 1080
         self.label = QLabel(self)
-        self.layout.addWidget(self.label, self.current_row, 3, 1, 3)
+        self.layout.addWidget(self.label, self.current_row, 6, 1, 13)
 
         self.current_row += 1
 
@@ -278,7 +366,85 @@ class DenseViewer(QMainWindow):
         self.prev_btn.clicked.connect(self.decrement_index)
         self.next_btn.clicked.connect(self.increment_index)
 
-        cv_img, pc_path, labels, radar_dets = self.dense_drawer.get_current_frame()
+        self.current_row += 1
+
+        # Update labels
+        self.activate_relabeling = False
+        self.relabel_btn = QPushButton("Activate relabeling")
+        self.layout.addWidget(self.relabel_btn)
+        self.relabel_btn.clicked.connect(self.toggle_update_label)
+        self.layout.addWidget(self.relabel_btn, self.current_row, 0)
+
+        self.objects_available = {}
+        self.obj_selected_for_update = None
+        self.cb_label_selection = QComboBox()
+        self.update_label_selection()
+        self.cb_label_selection.currentIndexChanged.connect(self.label_selection_change)
+        self.layout.addWidget(self.cb_label_selection, self.current_row, 1)
+
+        self.add_label_btn = QPushButton("Add new object")
+        self.add_label_btn.clicked.connect(self.add_predicted_obj)
+        self.add_label_btn.setEnabled(self.activate_relabeling)
+        self.layout.addWidget(self.add_label_btn, self.current_row, 2)
+
+        self.update_label_btn = QPushButton("Update object")
+        self.update_label_btn.clicked.connect(self.update_label)
+        self.update_label_btn.setEnabled(self.activate_relabeling)
+        self.layout.addWidget(self.update_label_btn, self.current_row, 3)
+
+        self.current_row += 1
+
+        self.changeable_values = ['posx', 'posy', 'posz', 'length', 'width', 'height', 'orient3d']
+        self.le_bbox_update = {}
+        self.labels_bbox_update = {}
+        idx = 0
+        for vals in self.changeable_values:
+            self.labels_bbox_update[vals] = QLabel(f'{vals}:')
+            self.layout.addWidget(self.labels_bbox_update[vals], self.current_row, idx)
+            idx += 1
+            self.le_bbox_update[vals] = QLineEdit()
+            self.le_bbox_update[vals].setValidator(QDoubleValidator(-100, 100, 2))
+            self.layout.addWidget(self.le_bbox_update[vals], self.current_row, idx)
+            idx += 1
+
+        self.label_selection_change()
+        self.update_viewer(cv_img, pc_path, labels, radar_dets)
+
+    def toggle_update_label(self):
+        self.activate_relabeling = not self.activate_relabeling
+        btn_text = 'Deactivate relabeling' if self.activate_relabeling else 'Activate relabeling'
+        self.relabel_btn.setText(btn_text)
+        self.add_label_btn.setEnabled(self.activate_relabeling)
+        self.update_label_btn.setEnabled(self.activate_relabeling)
+        self.dense_drawer.use_relabel = self.activate_relabeling
+        self.update_label()
+        
+    def update_label_selection(self):
+        objects = self.dense_drawer.get_relabeled_objects()
+        for obj in objects:
+            curr_id = str(obj['relabel_id'])
+            self.cb_label_selection.addItem(curr_id)
+            self.objects_available[curr_id] = copy.deepcopy(obj)
+
+    def label_selection_change(self):
+        key = self.cb_label_selection.currentText()
+        if key in self.objects_available:
+            self.obj_selected_for_update = self.objects_available[key]
+            for vals in self.changeable_values:
+                self.le_bbox_update[vals].setText(f'{self.obj_selected_for_update[vals]:.3f}')
+            cv_img, pc_path, labels, radar_dets = self.dense_drawer.select_relabeled_obj(int(key))
+            self.update_viewer(cv_img, pc_path, labels, radar_dets)
+
+    def update_label(self):
+        changes_from_textfield = []
+        for vals in self.changeable_values:
+            changes_from_textfield.append(float(self.le_bbox_update[vals].text()))
+        cv_img, pc_path, labels, radar_dets = self.dense_drawer.update_bbox(self.obj_selected_for_update, *changes_from_textfield)
+        self.update_viewer(cv_img, pc_path, labels, radar_dets)
+
+    def add_predicted_obj(self):
+        cv_img, pc_path, labels, radar_dets = self.dense_drawer.add_pred_obj()
+        self.update_label_selection()
         self.update_viewer(cv_img, pc_path, labels, radar_dets)
 
     def decrement_index(self):

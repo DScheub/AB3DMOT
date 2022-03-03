@@ -138,6 +138,9 @@ class Tracker:
         assert frame_idx < self.get_num_of_frames(), f'Index {frame_idx} is out of range. Elements in dataset: {self.get_num_of_frames()}'
         return self.tracked_objects[frame_idx]
 
+    def plot_tracectories(self):
+        self.mot_tracker.plot_trajectories()
+
 
 if __name__ == "__main__":
 
