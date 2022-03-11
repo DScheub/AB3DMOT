@@ -8,6 +8,9 @@ from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
 from AB3DMOT_libs.bbox_utils import convert_3dbox_to_8corner, iou3d, roty
 from AB3DMOT_libs.kalman_filter_dense import KalmanBoxDenseTracker
+from utils.radar_corrections import transform_radar_velocity
+
+import matplotlib.pyplot as plt
 
 
 def dist_to_rectangle(corners_rectangle, pts, debug=False):
@@ -22,10 +25,12 @@ def dist_to_rectangle(corners_rectangle, pts, debug=False):
     w = corners_rectangle[:, 0]
     u = (corners_rectangle[:, 1] - w)
     dims[0] = np.linalg.norm(u)
-    u = u / dims[0]
     v = (corners_rectangle[:, 3] - w)
     dims[1] = np.linalg.norm(v)
+    if (abs(dims) < 1e-3).any():
+        return 1000.0 * np.ones(pts.shape[1])
     v = v / dims[1]
+    u = u / dims[0]
     if debug:
         print(f'{u=}')
         print(f'{v=}')
@@ -39,7 +44,6 @@ def dist_to_rectangle(corners_rectangle, pts, debug=False):
         print(f'{pts=}')
         print(f'{pts_rect=}')
 
-    dist = np.inf
     zeros = np.zeros_like(pts_rect)
     du = np.max(np.vstack((zeros[0, :], pts_rect[0, :] - dims[0], -pts_rect[0, :])), axis=0)
     dv = np.max(np.vstack((zeros[1, :], pts_rect[1, :] - dims[1], -pts_rect[1, :])), axis=0)
@@ -51,7 +55,6 @@ def dist_to_rectangle(corners_rectangle, pts, debug=False):
         print(f'{dv=}')
         print(f'{dist=}')
 
-        import matplotlib.pyplot as plt 
         plt.plot(np.hstack((corners_rectangle[0, :], corners_rectangle[0, 0])), np.hstack((corners_rectangle[1, :], corners_rectangle[1, 0])),
                  pts[0, :], pts[1, :], 'g^')
         plt.axis('square')
@@ -89,6 +92,12 @@ def associate_radar_to_trackers(radar_dets, tracker_dets, distance_threshold=2, 
 
     radar_ind, tracker_ind = linear_sum_assignment(distance_matrix)
     assigned_idx = np.stack((radar_ind, tracker_ind), axis=1)
+    if debug:
+        print(f'{radar_dets=}')
+        print(f'{tracker_dets=}')
+        print(f'{distance_matrix=}')
+        print(f'{radar_ind=}')
+        print(f'{tracker_ind=}')
 
     unmatched_radar = np.setdiff1d(np.arange(radar_dets.shape[0]), radar_ind)
     unmatched_tracker = np.setdiff1d(np.arange(tracker_dets.shape[0]), tracker_ind)
@@ -156,7 +165,7 @@ def associate_detections_to_trackers(detections, trackers, iou_threshold=0.01):
 
 
 class AB3DMOT(object):
-    def __init__(self, max_age=4, min_hits=5):      # max age will preserve the bbox does not appear no more than 2 frames, interpolate the detection
+    def __init__(self, calib, max_age=4, min_hits=1):      # max age will preserve the bbox does not appear no more than 2 frames, interpolate the detection
         """
         TODO
         """
@@ -167,6 +176,9 @@ class AB3DMOT(object):
         self.trackers = []
         self.trackers_over_time = []
         self.trajectories = {}
+
+
+        self.calib = calib
 
     def run_for_all_frames(self, dets, confidence_scores, radar_dets):
         """
@@ -187,12 +199,7 @@ class AB3DMOT(object):
             if isinstance(confidence_scores[frame], np.ndarray):
                 conf = confidence_scores[frame].reshape(-1)
             if isinstance(radar_dets[frame], np.ndarray):
-                radar = radar_dets[frame].reshape((-1, 5))
-                # Filter out radar detections without velocity
-                velocity_mask = radar[:, 3] > 0
-                radar = radar[velocity_mask, 0:3]
-                if radar.size == 0:
-                    radar = []
+                radar = radar_dets[frame]
 
             # Run prediction and update step of Kalman Filter
             tracked_obj_in_frame = self.update(det, conf, radar)
@@ -203,15 +210,10 @@ class AB3DMOT(object):
         for tracked_obj_in_frame in reversed(trackers_over_time):
             assigned_obj = []
             for obj in tracked_obj_in_frame:
-                if obj.has_radar_assigned and (obj.id not in self.trajectories.keys()):
+                if obj.has_radar_assigned or obj.id in self.trajectories.keys():
                     assigned_obj.append(obj)
-                    self.trajectories[obj.id] = [obj]
-                elif obj.has_radar_assigned and (obj.id in self.trajectories.keys()):
-                    assigned_obj.append(obj)
-                    self.trajectories[obj.id].insert(0, obj)
-                elif (not obj.has_radar_assigned) and (obj.id in self.trajectories.keys()):
-                    assigned_obj.append(obj)
-                    self.trajectories[obj.id].insert(0, obj)
+                    if obj.id not in self.trajectories.keys():
+                        self.trajectories[obj.id] = copy.deepcopy(obj)
                 else:
                     pass
             self.trackers_over_time.append(assigned_obj)
@@ -232,8 +234,6 @@ class AB3DMOT(object):
 
         if isinstance(confidence_scores, np.ndarray):
             assert (confidence_scores <= 1).all() and (confidence_scores >= 0).all(), f' Confidence scores: {confidence_scores}'
-
-        self.frame_count += 1  # Accept objects in first frames as tracked even if below min_hits
 
         # Run prediction for already found trackers
         trks = np.zeros((len(self.trackers), 7))  # N x 7 , # get predicted locations from existing trackers.
@@ -264,24 +264,42 @@ class AB3DMOT(object):
                 d = matched[np.where(matched[:, 1] == t)[0], 0]
                 trk.update(dets[d, :][0], confidence_scores[d].squeeze())
 
+        # Create and initialise new trackers for unmatched detections
+        for i in unmatched_dets:
+            trk = KalmanBoxDenseTracker(dets[i, :], confidence_scores[i].squeeze(), global_time_idx=self.frame_count)
+            self.trackers.append(trk)
+
         # Assign radar detections
         if isinstance(radar_dets, np.ndarray) and self.trackers:
             # Check if radar detections can be assigned to tracker
             xyz_camera = []
             for idx, trk in enumerate(self.trackers):
-                if trk.hits >= self.min_hits:
-                    state = trk.get_state()
-                    xyz_camera.append(state)
+                # if trk.hits >= self.min_hits:
+                state = trk.get_state()
+                xyz_camera.append(state)
             if xyz_camera:
                 xyz_camera = np.asarray(xyz_camera)
-                matches, _, _, = associate_radar_to_trackers(radar_dets, xyz_camera, distance_threshold=1)
-                for match in matches:
-                    self.trackers[match[1]].assign_radar()
+                matches, _, _, = associate_radar_to_trackers(radar_dets[:, :3], xyz_camera, distance_threshold=1)
+                for match_row in range(matches.shape[0]):
+                    radar_det = radar_dets[matches[match_row, 0], :].copy()
+                    radar_det_camera = radar_det.copy()
+                    radar_det_radar = self.calib.rect_to_radar(radar_det[:3].reshape(1, -1))
+                    radar_det[:3] = radar_det_radar.reshape(-1)
+                    orient3d = self.trackers[matches[match_row, 1]].get_state()[3]
+                    yaw_ego = radar_det[5]
+                    vel_ego = radar_det[6]
+                    vel_tracker = transform_radar_velocity(radar_det, self.calib, orient3d, yaw_ego, vel_ego)
+                    if abs(vel_tracker[0, 2]) > 10:
+                        from utils.plot import plot_bev_radar, plot_bev_bbox_from_tracker
+                        fix, ax = plt.subplots()
+                        ax = plot_bev_radar(ax, radar_det_camera.reshape(1, -1))
+                        ax = plot_bev_bbox_from_tracker(ax, self.trackers[matches[match_row, 1]].get_state())
+                        plt.show()
 
-        # Create and initialise new trackers for unmatched detections
-        for i in unmatched_dets:
-            trk = KalmanBoxDenseTracker(dets[i, :], confidence_scores[i].squeeze())
-            self.trackers.append(trk)
+                    radar_det_with_vel = np.zeros(6)
+                    radar_det_with_vel[:3] = radar_det_camera[:3]
+                    radar_det_with_vel[3:] = vel_tracker
+                    self.trackers[matches[match_row, 1]].assign_radar(radar_det_with_vel, self.frame_count)
 
         # Eliminate dead trackers and create return
         good_trackers = []
@@ -301,6 +319,8 @@ class AB3DMOT(object):
         # else:
         #   return np.empty((0, 9))
 
+        self.frame_count += 1  # Accept objects in first frames as tracked even if below min_hits
+
         return good_trackers
 
     def get_num_of_frames(self):
@@ -310,14 +330,52 @@ class AB3DMOT(object):
         assert frame_idx < len(self.trackers_over_time)
         return self.trackers_over_time[frame_idx]
 
-    def get_trajectory_by_id(self, obj_id):
-        assert obj_id in self.trajectories.keys()
-        return self.trajectories[obj_id]
+    def plot_trajectories(self):
+        plt.figure()
+        print(self.trajectories)
+        print("*****************")
+        for obj in self.trajectories.values():
+            if obj.id not in [0, 89]:
+                continue
+
+            t, x, t_rad, x_rad = obj.get_trajectory()
+            print(f'############## {obj.id} ##############')
+            print(f'{t=}')
+            print(f'{x=}')
+            print(f'{t_rad=}')
+            print(f'{x_rad=}')
+            label_filt = f'filtered for {obj.id}'
+            label_rad = f'radar for {obj.id}'
+            plt.subplot(221)
+            plt.plot(t, x[:, 0], label=label_filt)
+            plt.plot(t_rad, x_rad[:, 0], label=label_rad)
+            plt.subplot(222)
+            plt.plot(t, x[:, 2], label=label_filt)
+            plt.plot(t_rad, x_rad[:, 2], label=label_rad)
+            plt.subplot(223)
+            plt.plot(t, x[:, 7] / 0.1, label=label_filt)
+            plt.plot(t_rad, x_rad[:, 3], label=label_rad)
+            plt.subplot(224)
+            plt.plot(t, x[:, 9] / 0.1, label=label_filt)
+            plt.plot(t_rad, x_rad[:, 5], label=label_rad)
+        plt.legend()
+        plt.subplot(221)
+        plt.xlabel('time idx')
+        plt.ylabel('x_camera [m]')
+        plt.subplot(222)
+        plt.xlabel('time idx')
+        plt.ylabel('z_camera [m]')
+        plt.subplot(223)
+        plt.xlabel('time idx')
+        plt.ylabel('vx')
+        plt.subplot(224)
+        plt.xlabel('time idx')
+        plt.ylabel('vz')
+        plt.show()
 
 
 if __name__ == "__main__":
 
-    ###### dist_to_rectangle ########
     # camera coord 2D [x, z]
     # center = np.asarray([1, 10])
     # angle_deg = 10
@@ -343,25 +401,26 @@ if __name__ == "__main__":
     from utils.read_datastructure import generate_indexed_datastructure
     from utils.dense_transforms import Calibration
     from SeeingThroughFog.tools.DatasetViewer.lib.read import get_kitti_object_list, load_radar_points
-    idx = 10
-    data_path = '/lhome/dscheub/ObjectDetection/data/external/SprayAugmentation/2019-09-11_21-15-42'
+    from utils.radar_corrections import transform_radar
+    idx = 1001
+    data_path = '/lhome/dscheub/ObjectDetection/data/external/SprayAugmentation/2021-07-28_18-21-02'
     stf_path = '/lhome/dscheub/ObjectDetection/SeeingThroughFog'
     calib = Calibration(stf_path=stf_path)
-    dense_data = generate_indexed_datastructure(data_path)
+    dense_data = generate_indexed_datastructure(data_path, tracked_label_suffix='_pointrcnn_wet')
     frame = dense_data[idx]
-    objects = get_kitti_object_list(frame['pred_label'])
+    print(f'{frame=}')
+    objects = get_kitti_object_list(frame['tracked_label'])
     trackers = np.zeros((len(objects), 7))
     for idx, obj in enumerate(objects):
         trackers[idx, :] = np.asarray([obj['posx'], obj['posy'], obj['posz'], obj['orient3d'], obj['length'], obj['width'], obj['height']])
     print(f'{trackers=}')
-    radar = load_radar_points(frame['radar'])
-    radar = radar[radar[:, 3] > 0]
-    radar_camera = calib.radar_to_rect(radar[:, :3])
+    radar_det = load_radar_points(frame['radar'])
+    radar_det = radar_det[radar_det[:, 3] > 0]
+    radar_camera, vel = transform_radar(radar_det, frame['can'], calib)
     matches, unmatched_radar, unmatched_tracker = associate_radar_to_trackers(radar_camera, trackers, debug=True)
     print("Matches:\n",  matches)
     print("Unmatched radar:\n", unmatched_radar)
     print("Unmatched tracker:\n", unmatched_tracker)
-
 
     # print("======= Test associate_radar_to_trackers =======")
     # # trackers: M x 6 [[bbox_x, bbox_y, bbox_z, theta, l, w, h], ...]
@@ -374,5 +433,3 @@ if __name__ == "__main__":
     # print("Unmatched radar:\n", unmatched_radar)
     # print("Unmatched tracker:\n", unmatched_tracker)
     # print("=====================")
-
-

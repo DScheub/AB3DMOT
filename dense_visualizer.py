@@ -22,17 +22,24 @@ from dense_tracker import Tracker
 
 # DENSE = Path.home() / 'ObjectDetection/data/external/SprayAugmentation/2019-09-11_21-15-42' # Atuobahn Nacht klar
 # DENSE = Path.home() / 'ObjectDetection/data/external/SprayAugmentation/2021-07-26_19-17-21' # G Klasse
-DENSE = Path.home() / 'ObjectDetection/data/external/SprayAugmentation/2021-07-28_18-21-02'  # CLA erst trocken bis ca 1000, dann nasse Fahrbahnahn bis ca 1365
-# DENSE = Path.home() / 'ObjectDetection/data/external/SeqData/2018-10-29_14-35-02' # Andrea
+# DENSE = Path.home() / 'ObjectDetection/data/external/SprayAugmentation/2021-07-28_18-21-02'  # CLA erst trocken bis ca 1000, dann nasse Fahrbahnahn bis ca 1365
+DENSE = Path.home() / 'ObjectDetection/data/external/ImmendingenSprayTestsv3/2021-07-26_19-15-15'
 STF = Path.home() / 'ObjectDetection/AB3DMOT/SeeingThroughFog'
 
-RUN_TRACKER = False
+START_IDX = 120 
+END_IDX = None 
+# START_IDX = 1000 
+# END_IDX = 1400 
+
+RUN_TRACKER = True 
 USE_RADAR = True
 FILTER_RADAR = True
 DRAW_3D = True
 DRAW_ANCHORED = False
-PC_SUFFIX = '_egomotion'
-PRED_SUFFIX = '_egomotion'
+
+PC_SUFFIX = '_egomotion'  # strongest_echo{PC_SUFFIX}
+# PRED_SUFFIX = '_egomotion'  # pred_labels{PRED_SUFFIX}
+PRED_SUFFIX = '_pointrcnn_wet'  # pred_labels{PRED_SUFFIX}
 TRACKED_SUFFIX = None
 
 
@@ -79,13 +86,13 @@ class DenseDrawer:
         if RUN_TRACKER:
             start = time.time()
             print("Running tracker")
-            self.tracker = Tracker(self.dense_data, stf_path)
+            self.tracker = Tracker(self.dense_data, stf_path, f'{DENSE}/odometry.csv')
             print("Running tracker finished. Elapsed time: ", time.time() - start)
-            self.tracker.plot_tracectories()
+            self.tracker.plot_trajcectories()
 
         self.current_image = None
         self.labels = {'pred_label': [], 'gt_label': [], 'tracked': [], 'relabeled': {}}
-        self.use_relabel = False 
+        self.use_relabel = False
 
         self.radar_detections = None
 
@@ -316,7 +323,7 @@ class DenseViewer(QMainWindow):
         self.img_width = 1600
         self.img_height = int(self.img_width * 9 / 16)
 
-        dense_data = generate_indexed_datastructure(root_dir, 0, 2000, 
+        dense_data = generate_indexed_datastructure(root_dir, START_IDX, END_IDX,
                                                     pc_suffix=PC_SUFFIX,
                                                     pred_label_suffix=PRED_SUFFIX,
                                                     tracked_label_suffix=TRACKED_SUFFIX)
@@ -418,24 +425,35 @@ class DenseViewer(QMainWindow):
         self.update_label_btn.setEnabled(self.activate_relabeling)
         self.dense_drawer.use_relabel = self.activate_relabeling
         self.update_label()
-        
+
     def update_label_selection(self):
+        """
+        Updates combo box for choosing labels
+        """
+
         objects = self.dense_drawer.get_relabeled_objects()
+        self.objects_available = {}
+        self.cb_label_selection.clear()
         for obj in objects:
             curr_id = str(obj['relabel_id'])
             self.cb_label_selection.addItem(curr_id)
             self.objects_available[curr_id] = copy.deepcopy(obj)
 
     def label_selection_change(self):
+        """
+        Writes values in text boxes. Call update_label_selection first
+        """
         key = self.cb_label_selection.currentText()
         if key in self.objects_available:
             self.obj_selected_for_update = self.objects_available[key]
             for vals in self.changeable_values:
                 self.le_bbox_update[vals].setText(f'{self.obj_selected_for_update[vals]:.3f}')
             cv_img, pc_path, labels, radar_dets = self.dense_drawer.select_relabeled_obj(int(key))
-            self.update_viewer(cv_img, pc_path, labels, radar_dets)
 
     def update_label(self):
+        """
+        Redraws img and pc if label has been changed in textbox
+        """
         changes_from_textfield = []
         for vals in self.changeable_values:
             changes_from_textfield.append(float(self.le_bbox_update[vals].text()))
@@ -462,6 +480,10 @@ class DenseViewer(QMainWindow):
             self.decrement_index()
 
     def update_viewer(self, cv_img, pc_path=None, label=None, radar_dets=None):
+        
+        self.update_label_selection()
+        self.label_selection_change()
+
         pixmap = self.convert_cv_qt(cv_img, self.img_width, self.img_height)
         self.label.setPixmap(pixmap)
 

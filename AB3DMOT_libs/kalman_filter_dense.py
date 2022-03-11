@@ -3,7 +3,7 @@
 
 import numpy as np
 from filterpy.kalman import KalmanFilter
-
+import copy
 
 def map_angle_to_range(angle):
     if angle >= np.pi:
@@ -21,7 +21,7 @@ class KalmanBoxDenseTracker(object):
     count = 0
     penalize_angular_vel = True
 
-    def __init__(self, bbox3D, confidence_score):
+    def __init__(self, bbox3D, confidence_score, global_time_idx=0):
         """
         Initialises a tracker using initial bounding box.
         """
@@ -97,10 +97,25 @@ class KalmanBoxDenseTracker(object):
         self.age = 0
 
         self.has_radar_assigned = False
+        self.num_radar_assigned = 0
+        self.num_radar_assigned_threshold = 5
 
-    def assign_radar(self):
-        # print('Radar was assigned')
-        self.has_radar_assigned = True
+        self.global_time_idx = global_time_idx
+        self.trajectory = self.kf.x.reshape(1, self.dim_x)
+        self.trajectory_radar = None 
+
+    def assign_radar(self, radar_dets, timestamp):
+        self.num_radar_assigned += 1
+        if self.num_radar_assigned > self.num_radar_assigned_threshold:
+            self.has_radar_assigned = True
+
+        if self.trajectory_radar is None:
+            self.trajectory_radar = {}
+            self.trajectory_radar['t'] = np.asarray([timestamp])
+            self.trajectory_radar['x'] = radar_dets.reshape(1, -1)
+        else:
+            self.trajectory_radar['t'] = np.concatenate((self.trajectory_radar['t'], np.asarray([timestamp])))
+            self.trajectory_radar['x'] = np.vstack((self.trajectory_radar['x'], radar_dets))
 
     def update(self, bbox3D, confidence_score):
         """
@@ -134,10 +149,10 @@ class KalmanBoxDenseTracker(object):
             angular_dev = bbox3D[3] - self.kf.x[3]
             R[0, 0] += 100 * (angular_dev * (12 / np.pi))**2
             R[3, 3] += 5000 * (angular_dev * (12 / np.pi))**2
-            # if self.id == 0:
-                # print(f'Penalty R:\n {np.diagonal(R)}')
         self.kf.update(bbox3D, R=R)
         self.kf.x[3] = map_angle_to_range(self.kf.x[3])
+
+        self.trajectory = np.vstack((self.trajectory, self.kf.x.reshape(1, self.dim_x)))
 
     def predict(self):
         """
@@ -158,7 +173,16 @@ class KalmanBoxDenseTracker(object):
         """
         Returns the current bounding box estimate.
         """
-        return self.kf.x[:7].reshape((7, ))
+        return copy.deepcopy(self.kf.x[:7].reshape((7, )))
+
+    def get_trajectory(self):
+
+        print(f'{self.global_time_idx=}')
+        print(f'{self.trajectory.shape[0]=}')
+        time = np.arange(self.global_time_idx, self.global_time_idx + self.trajectory.shape[0])
+        trajectory = copy.deepcopy(np.asarray(self.trajectory))
+        trajectory_radar = copy.deepcopy(self.trajectory_radar)
+        return time, trajectory, trajectory_radar['t'], trajectory_radar['x']
 
 
 if __name__ == "__main__":
